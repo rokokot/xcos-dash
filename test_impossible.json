@@ -11,7 +11,7 @@
       "id": "c1",
       "expression": "AllDifferent([X, Y, Z])",
       "type": "hard",
-      "description": "All must be different - but only 2 values available!",
+      "description": "All must be different - but only 2 available",
       "enabled": true
     }
   ],

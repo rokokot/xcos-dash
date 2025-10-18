@@ -1,6 +1,6 @@
 {
-  "id": "exam-demo",
-  "name": "Exam Scheduling Demo",
+  "id": "exam",
+  "name": "Exam Scheduling",
   "variables": [
     {"name": "Exam_A", "domain": ["Mon_9am", "Mon_2pm", "Tue_9am", "Tue_2pm"]},
     {"name": "Exam_B", "domain": ["Mon_9am", "Mon_2pm", "Tue_9am", "Tue_2pm"]},
