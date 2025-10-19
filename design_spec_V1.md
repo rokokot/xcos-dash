@@ -196,18 +196,28 @@
 
   * Implements all MUS/MCS/counterfactual logic
   * Provides REST + WebSocket endpoints
-* **Frontend:** React + D3 + Zustand
+* **Frontend:** React + TypeScript + Vite + Tailwind CSS
 
-  * Dashboard organized as:
-    **Left:** Constraints panel
-    **Center:** Schedule / Graph view
-    **Right:** Explanation & Repair panel
-* **Visualization modules:**
+  * Dashboard organized as (June CS Schedule View):
+    **Top:** Deadlines rail showing project deadlines per day
+    **Center:** Schedule grid (Rooms × Time with day tabs)
+    **Right:** Oral Panel (ANN interviews) + Explanation & Repair panel
+    **Left:** Constraints panel (optional, collapsible)
+  * **Component Development:** Storybook for isolated component development and testing
+  * **Styling:** Tailwind CSS with class-variance-authority for variant management
+  * **Icons:** Lucide React for consistent iconography
+  * **State Management:** Custom hooks (useApi, useCSPModel) for API integration
+* **Visualization modules (June CS Prototype):**
 
-  * ConflictInspector (MUS/MCS)
-  * ParetoExplorer
-  * ScenarioComparator
-  * RepairMenu
+  * **ScheduleGrid** - Rooms × Time grid with day tabs, color-coded cells
+  * **DeadlinesRail** - Project deadline chips with hover highlighting
+  * **OralPanel** - ANN oral interview slot assignments
+  * **MomentLockIndicator** - Lock icons for pre-chosen exam moments
+  * **MUSInspector** - Conflict visualization with deadline/lock labels
+  * **RepairMenu** - MCS-based repair options with impact preview
+  * **ConstraintEditor** - Constraint CRUD operations
+  * **ExplanationView** - Explanation visualization
+  * **SolverPanel** - Solution display (written + oral)
 
 ---
 
@@ -466,6 +476,244 @@ It allows:
 ---
 
 Would you like me to sketch three **layout variations** for this schedule-centric dashboard (minimal analytic, explanatory-rich, and what-if exploration) so you can compare visual composition and user flow before committing to one direction?
+
+---
+
+## 🛠️ Component Development Workflow
+
+### **Storybook-Driven Development**
+
+The xCoS Dashboard follows a **component-driven development** approach using Storybook 9.1.13 for isolated component development, testing, and documentation.
+
+#### **Development Cycle**
+1. **Design Component** - Define props, variants, and behavior
+2. **Build in Storybook** - Develop component in isolation with visual feedback
+3. **Write Stories** - Document all states, variants, and edge cases
+4. **Test Interactively** - Use Storybook addons (a11y, interactions, controls)
+5. **Integrate** - Import component into feature modules or dashboard
+
+#### **Component Architecture**
+
+Components follow a layered architecture:
+
+```
+UI Primitives (src/components/ui/)
+  ↓ composed into ↓
+Dashboard Components (src/components/dashboard/)
+  ↓ composed into ↓
+Feature Components (src/components/)
+  ↓ composed into ↓
+Pages/Views (src/App.tsx, etc.)
+```
+
+**UI Primitives** (Currently Missing - See Priority 0 in SYSTEM_AUDIT.md):
+- Button, Card, Badge, Input, Label
+- Recommended: Install via shadcn/ui for consistency with existing patterns
+
+**Dashboard Components**:
+- MetricsCard - Display key statistics with trends
+- ChartWidget - Data visualizations
+- StatusIndicator - System/solver status
+- Timeline - Event/progress tracking
+
+**Feature Components** (Existing):
+- ConstraintEditor - Constraint CRUD operations
+- ExplanationView - MUS/MCS visualization
+- SolverPanel - Solution display and interaction
+
+#### **Styling Standards**
+- **Primary:** Tailwind utility classes for rapid development
+- **Variants:** class-variance-authority (CVA) for component variants
+- **Conditional:** `cn()` utility (clsx + tailwind-merge) for conditional classes
+- **Icons:** Lucide React for consistent iconography
+- **No CSS files:** Avoid separate .css files; use Tailwind utilities
+
+#### **TypeScript Conventions**
+- All components fully typed with TypeScript
+- Props interfaces exported for reuse
+- Use `React.FC<Props>` or `React.forwardRef` patterns
+- JSDoc comments for prop documentation (visible in Storybook)
+
+#### **Storybook Configuration**
+
+**Addons Installed:**
+- `@storybook/addon-docs` - Auto-generated documentation
+- `@storybook/addon-a11y` - Accessibility testing
+- `@storybook/addon-vitest` - Component testing integration
+- `@chromatic-com/storybook` - Visual regression testing (optional)
+
+**Recommended Additions:**
+- `@storybook/addon-interactions` - Interactive component testing
+- `@storybook/addon-themes` - Dark mode testing (if needed)
+- `storybook-addon-mock` - API mocking for data-driven components
+
+#### **Story Patterns**
+
+Use CSF3 (Component Story Format 3.0) with TypeScript:
+
+```typescript
+import type { Meta, StoryObj } from '@storybook/react';
+import { MyComponent } from './MyComponent';
+
+const meta: Meta<typeof MyComponent> = {
+  title: 'Category/MyComponent',
+  component: MyComponent,
+  tags: ['autodocs'],
+};
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const Default: Story = {
+  args: { /* props */ },
+};
+```
+
+**Story Organization:**
+- `UI/ComponentName` - Primitive components
+- `Dashboard/ComponentName` - Dashboard-specific components
+- `Features/ComponentName` - Feature modules
+- `Pages/PageName` - Full page compositions
+
+### **Quality Standards**
+
+All components must:
+1. ✅ Have corresponding Storybook stories
+2. ✅ Pass accessibility checks (addon-a11y)
+3. ✅ Document all props with JSDoc
+4. ✅ Support all defined variants
+5. ✅ Handle edge cases (empty state, loading, error)
+6. ✅ Be responsive (mobile, tablet, desktop)
+
+---
+
+## 🎓 June CS Prototype: Model-Specific Design Decisions
+
+### **Moment Locking and Repair Constraints**
+
+**Problem:** Students pre-select which moment (sitting) of an exam to attend. This choice is **immutable**.
+
+**Design implication:**
+- Repairs CANNOT reassign individual students to different moments
+- MUS must explain conflicts that arise FROM locked moments
+- MCS options must respect locks: move entire moment, change room/time, relax soft constraints
+- UI shows lock icon + tooltip explaining immutability
+
+**Visualization:**
+```
+Written Exam Cell:
+┌─────────────────────┐
+│ 🔒 CS101 Moment 1  │  ← Lock icon
+│ Room 201, 9:00-12:00│
+│ 45 students         │
+└─────────────────────┘
+Tooltip: "Pre-chosen moment - students cannot be reassigned"
+```
+
+### **Deadline Precedence and Soft Spacing**
+
+**Problem:** Project deadlines create temporal constraints:
+- ANN oral MUST occur after ANN report deadline (hard)
+- Other exams should avoid deadline days (soft, penalized)
+
+**Design implication:**
+- Deadlines Rail shows WHEN deadlines create scheduling pressure
+- Hovering deadline chip highlights affected students' exams
+- MUS for ANN precedence violation shows: `deadline < oral` constraint
+- Soft violations appear as amber cells (not red/UNSAT)
+
+**Visualization:**
+```
+Deadlines Rail (above grid):
+┌────────────────────────────────────┐
+│ Mon: [ANN Report 📝] [DB Project] │  ← Deadline chips
+│ Tue: [ML Project]                  │
+└────────────────────────────────────┘
+
+Hover ANN Report → highlights:
+- ANN oral slots (must be after this)
+- ANN students' other exams (soft penalty if on same day)
+```
+
+### **Mixed Exam Types: Written + Oral + Project-Only**
+
+**Problem:** Not all courses have sit-down exams:
+- Written exams: Traditional (most courses, 2 moments each)
+- Oral exam: Only ANN (per-student 30-60m slots)
+- Project-only: Several courses have NO exam, just deadline
+
+**Design implication:**
+- Schedule grid shows both written (full blocks) and oral (slot cells)
+- Oral Panel (sidebar) lists ANN interview assignments separately
+- Deadlines Rail distinguishes project-only vs. exam+project courses
+
+**Visualization:**
+```
+Schedule Grid:
+       9:00   10:00   11:00
+201   [CS101 Moment 1  ]  ← Written exam (large block)
+301   [ANN]  [ANN]  [ANN]  ← Oral slots (30m each)
+
+Oral Panel (right sidebar):
+ANN Oral Interviews:
+- Thu 10:00-10:30: Alice (Room 301)
+- Thu 10:30-11:00: Bob (Room 301)
+- Thu 11:00-11:30: Charlie (Room 302)
+```
+
+### **Room Type Exclusions**
+
+**Problem:** Meeting rooms are **forbidden** for all exams (hard constraint).
+
+**Design implication:**
+- Meeting rooms appear greyed out in room list
+- Forbidden badge or strikethrough
+- Repairs never suggest using meeting rooms
+- Validation at model creation time
+
+**Visualization:**
+```
+Room List:
+✅ Room 201 (PC Room)
+✅ Auditorium A
+✅ Classroom B
+❌ Meeting Room 1  ← Greyed out + forbidden icon
+❌ Meeting Room 2
+```
+
+### **Day Boundary Constraints**
+
+**Problem:** All exams (including accommodation time) must end by 17:00.
+
+**Design implication:**
+- Time axis shows 9:00-17:00 with clear boundary line
+- Accommodation time shown as hatched extension (+60m)
+- MUS for boundary violation highlights: `start + duration + accom <= 17:00`
+
+**Visualization:**
+```
+Time Axis:
+9:00  10:00  11:00  12:00  13:00  14:00  15:00  16:00  17:00
+                                                  │ ← Boundary
+[Exam: 4h base                          ][+60m]
+                                         ↑ UNSAT if extends past 17:00
+```
+
+---
+
+## 📚 Documentation References
+
+**Implementation Guides:**
+- **`docs/plans/2025-10-19-xcos-dashboard-update-1.md`** - **AUTHORITATIVE June CS specification**
+- `docs/CLAUDE_PROJECT_PROMPT.md` - Prototype design prompt for Claude Project
+- `SYSTEM_AUDIT.md` - Complete tech stack and current status
+- `docs/STORYBOOK_SETUP.md` - Storybook installation guide
+- `docs/STORYBOOK_WORKFLOW.md` - Detailed component development workflow
+- `docs/storybook_example_component.tsx` - Reference component implementation
+- `docs/storybook_example_story.tsx` - Story writing examples
+- `docs/DOCUMENTATION_INDEX.md` - Complete documentation index
+
+---
 
 
 

@@ -33,9 +33,11 @@ Thumbs.db
 .env.local
 
 # Project Files
+.claude
 SYSTEM_AUDIT.md 
 CLAUDE.md
 explanation_formalism_V1.md
 meta_prompt.md
 BACKEND_TUTORIAL.md
-
+SYSTEM_AUDIT.md
+design_spec_V1.md
