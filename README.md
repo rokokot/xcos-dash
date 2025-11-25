@@ -1,5 +1,7 @@
 # xCoS Dashboard
 
+WIP - static version of the frontent without backend integration
+
 ## setup guide
 
 ```bash
@@ -30,4 +32,3 @@ Available datasets:
 1. put CSV files in `public/data/thesis-defences/`
 2. check `src/services/programmeDataLoader.ts` with new dataset mappings
 3. CSV format: See existing files for schema
-
