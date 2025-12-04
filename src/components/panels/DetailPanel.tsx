@@ -1,9 +1,12 @@
 /**
  * Detail Panel Component - Right sidebar for showing defence/participant details
- * v0.1.0 (31-10)
+ * v0.2.0 (25-11) - Added unscheduled events list mode
  */
 import { X, ChevronDown, ChevronRight, Calendar, Clock, MapPin, User, Users, Lock, Unlock, Trash2 } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { DefenceEvent } from '../../types/schedule';
+import { EventsSidebar } from './EventsSidebar';
+import { formatParticipantNames } from '../../utils/participantNames';
 
 export interface DefenceDetail {
   type: 'defence';
@@ -73,9 +76,39 @@ export interface DetailPanelProps {
   onEdit?: () => void;
   onDelete?: (defenceId: string) => void;
   currentTimeslotPriority?: 'normal' | 'prioritized' | 'deprioritized' | 'unavailable';
+  // Unscheduled events list mode
+  mode?: 'list' | 'detail';
+  unscheduledEvents?: DefenceEvent[];
+  searchQuery?: string;
+  onSearchChange?: (query: string) => void;
+  onCardClick?: (event: DefenceEvent) => void;
+  onAddNew?: () => void;
+  colorScheme?: Record<string, string>;
+  highlightedEventId?: string;
+  selectedEventId?: string;
 }
 
-export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 'fixed', editable = false, onSave, onEdit, onDelete, currentTimeslotPriority = 'normal' }: DetailPanelProps) {
+export function DetailPanel({
+  isOpen,
+  onClose,
+  content,
+  onAction,
+  positioning = 'fixed',
+  editable = false,
+  onSave,
+  onEdit,
+  onDelete,
+  currentTimeslotPriority = 'normal',
+  mode = 'detail',
+  unscheduledEvents = [],
+  searchQuery = '',
+  onSearchChange,
+  onCardClick,
+  onAddNew,
+  colorScheme = {},
+  highlightedEventId,
+  selectedEventId,
+}: DetailPanelProps) {
   const [studentExpanded, setStudentExpanded] = useState(true);
   const [committeeExpanded, setCommitteeExpanded] = useState(true);
   const [scheduleExpanded, setScheduleExpanded] = useState(true);
@@ -95,13 +128,51 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
     }
   }, [editable, content]);
 
-  if (!isOpen || !content) {
+  // Handle Escape key to close
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleEscapeKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleEscapeKey);
+    return () => document.removeEventListener('keydown', handleEscapeKey);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) {
     return null;
   }
 
   const positionClasses = positioning === 'fixed'
     ? 'fixed right-0 top-0 h-full'
     : 'relative h-full';
+
+  // List mode: show events sidebar with scheduled/unscheduled sections
+  if (mode === 'list') {
+    return (
+      <div className={`${positionClasses} w-96 bg-white border-l border-gray-200 shadow-lg z-50 flex flex-col`}>
+        <EventsSidebar
+          events={unscheduledEvents}
+          searchQuery={searchQuery}
+          onSearchChange={onSearchChange || (() => {})}
+          onCardClick={onCardClick || (() => {})}
+          onAddNew={onAddNew || (() => {})}
+          onClose={onClose}
+          colorScheme={colorScheme}
+          highlightedEventId={highlightedEventId}
+          selectedEventId={selectedEventId}
+        />
+      </div>
+    );
+  }
+
+  // Detail mode: show event/participant/timeslot details
+  if (!content) {
+    return null;
+  }
 
   const handleSave = () => {
     if (editedDefence && onSave) {
@@ -129,7 +200,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
       <>
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900 mb-3">
-            {defence.id.includes('defence-') && defence.student.name === 'New Student' ? 'Add New Defence' : 'Edit Defence'}
+            {defence.id.includes('defence-') && defence.student.name === 'New Student' ? 'Add New Defense' : 'Edit Defense'}
           </h2>
 
           {/* Timeslot Priority Controls */}
@@ -401,7 +472,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
             onClick={handleSave}
             className="flex-1 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 transition-colors"
           >
-            Save Defence
+            Save Defense
           </button>
           <button
             onClick={onClose}
@@ -417,7 +488,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
   const renderDefenceView = (defence: DefenceDetail) => (
     <>
       <div className="px-6 py-4 border-b border-gray-200">
-        <h2 className="text-lg font-semibold text-gray-900">Master Thesis Defence</h2>
+        <h2 className="text-lg font-semibold text-gray-900">Master Thesis Defense</h2>
         <div className="inline-block mt-1 px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded">
           {defence.student.programme}
         </div>
@@ -475,7 +546,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
               {defence.coSupervisor && (
                 <div>
                   <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Co-Supervisor</p>
-                  <p className="text-sm text-gray-900">{defence.coSupervisor}</p>
+                  <p className="text-sm text-gray-900">{formatParticipantNames(defence.coSupervisor)}</p>
                 </div>
               )}
               <div>
@@ -655,7 +726,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
         {participant.assignedDefences && participant.assignedDefences.length > 0 && (
           <div className="mb-6">
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">
-              Assigned Defences ({participant.assignedDefences.length})
+              Assigned Defenses ({participant.assignedDefences.length})
             </p>
             <div className="space-y-2">
               {participant.assignedDefences.map(defence => (
@@ -663,7 +734,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
                   key={defence.id}
                   className="p-2 bg-gray-50 rounded text-sm hover:bg-gray-100 cursor-pointer transition-colors"
                   onClick={() => onAction?.('view-defence', defence.id)}
-                >
+              >
                   <p className="font-medium text-gray-900">{defence.studentName}</p>
                   <p className="text-xs text-gray-600 mt-1">{defence.time}</p>
                 </div>
@@ -674,18 +745,6 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
       </div>
     </>
   );
-
-  // Handle Escape key to close
-  useEffect(() => {
-    const handleEscapeKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-
-    document.addEventListener('keydown', handleEscapeKey);
-    return () => document.removeEventListener('keydown', handleEscapeKey);
-  }, [onClose]);
 
   return (
     <div className={`${positionClasses} w-96 bg-white border-l border-gray-200 shadow-xl flex flex-col z-40`}>
@@ -708,7 +767,7 @@ export function DetailPanel({ isOpen, onClose, content, onAction, positioning = 
                 <button
                   onClick={() => onDelete(content.id)}
                   className="p-1 text-red-600 hover:bg-red-50 rounded transition-colors"
-                  title="Delete defence"
+                  title="Delete defense"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>

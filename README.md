@@ -1,6 +1,6 @@
 # xCoS Dashboard
 
-WIP - static version of the frontent without backend integration
+WIP - static version of the frontend without backend integration
 
 ## setup guide
 

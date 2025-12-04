@@ -52,3 +52,6 @@ data/**
 # Build artifacts
 vite.config.ts.timestamp*
 
+# Git worktrees
+.worktrees/
+

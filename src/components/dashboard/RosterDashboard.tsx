@@ -3,7 +3,9 @@
  *
  * v0.2.0 (02-11) - Added drag-and-drop, lock mechanism, history management
  */
-import { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback, startTransition, Fragment } from 'react';
+import { GripHorizontal } from 'lucide-react';
+import clsx from 'clsx';
 import { monitorForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
 import { extractClosestEdge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import { getReorderDestinationIndex } from '@atlaskit/pragmatic-drag-and-drop-hitbox/util/get-reorder-destination-index';
@@ -17,11 +19,12 @@ import { AvailabilityPanel } from '../availability/AvailabilityPanel';
 import { RosterInfo } from '../availability/AvailabilityGrid';
 import { ObjectivesPanel } from '../objectives/ObjectivesPanel';
 import { AdaptiveToolbar, CardViewMode } from '../toolbar/AdaptiveToolbar';
-import { PersonAvailability } from '../availability/types';
+import { PersonAvailability, AvailabilityStatus } from '../availability/types';
 import { GlobalObjective, LocalObjective } from '../../types/objectives';
-import { DefenceEvent, ScheduleState, ScheduleAction } from '../../types/schedule';
+import { DefenceEvent, ScheduleState, ScheduleAction, Conflict, ConflictSeverity } from '../../types/schedule';
 import { Roster } from '../../types/roster';
 import { useScheduleHistory } from '../../hooks/useScheduleHistory';
+import { usePersistedState, loadPersistedState, PersistedDashboardState } from '../../hooks/usePersistedState';
 import { DraggableDefenceCard } from '../scheduler/DraggableDefenceCard';
 import { DroppableTimeSlot } from '../scheduler/DroppableTimeSlot';
 import { generateGridFromTimeHorizon } from '../../utils/gridGenerator';
@@ -31,6 +34,17 @@ import { logger } from '../../utils/logger';
 import { showToast } from '../../utils/toast';
 import { detectEventConflicts } from '../../lib/availabilityLoader';
 import { defaultDefenceCardTheme } from '../../config/cardStyles.config';
+import { GridSetupModal } from '../modals/GridSetupModal';
+import { splitParticipantNames } from '../../utils/participantNames';
+import { ConflictsPanelV2 } from '../conflicts/ConflictsPanelV2';
+import { buildRoomAvailabilityRooms } from '../panels/RoomAvailabilityDrawer';
+import { RoomAvailabilityPanel } from '../panels/RoomAvailabilityPanel';
+
+const normalizeName = (name?: string | null) => (name || '').trim().toLowerCase();
+const expandParticipantNames = (value?: string | null) => splitParticipantNames(value);
+
+// Adjust this value to control the maximum width of each schedule column (in pixels)
+const SCHEDULE_COLUMN_WIDTH = 220;
 
 export interface RosterDashboardProps {
   events: DefenceEvent[];
@@ -51,57 +65,183 @@ export function RosterDashboard({
   onEventClick,
   onAvailabilityEdit,
 }: RosterDashboardProps) {
-  const initialState: ScheduleState = {
-    events: initialEvents,
-    locks: new Map(),
-    solverMetadata: null,
-    conflicts: [],
-  };
+  // Try to restore from localStorage first (lazy initialization)
+  const persistedState = useRef<PersistedDashboardState | null>();
+  if (persistedState.current === undefined) {
+    persistedState.current = loadPersistedState();
+  }
+  const hasPersistedState = persistedState.current !== null;
+
+  const initialState: ScheduleState = hasPersistedState
+    ? persistedState.current!.rosters.find(r => r.id === persistedState.current!.activeRosterId)?.state || {
+        events: initialEvents,
+        locks: new Map(),
+        solverMetadata: null,
+        conflicts: [],
+      }
+    : {
+        events: initialEvents,
+        locks: new Map(),
+        solverMetadata: null,
+        conflicts: [],
+      };
 
   const { currentState, canUndo, canRedo, push, undo, redo } = useScheduleHistory(initialState);
+  const events = currentState?.events || [];
 
   // Roster management with global counter for proper naming
-  const rosterCounterRef = useRef(1);
-  const [rosters, setRosters] = useState<Roster[]>([
-    {
-      id: 'roster-1',
-      label: 'Schedule 1',
-      state: initialState,
-      availabilities: initialAvailabilities,
-      objectives: {
-        global: [],
-        local: [],
-      },
-      createdAt: Date.now(),
-      source: 'manual',
-    },
-  ]);
-  const [activeRosterId, setActiveRosterId] = useState('roster-1');
+  const rosterCounterRef = useRef(
+    hasPersistedState ? persistedState.current!.rosters.length : 1
+  );
+  const [rosters, setRosters] = useState<Roster[]>(() =>
+    hasPersistedState
+      ? persistedState.current!.rosters
+      : [
+          {
+            id: 'roster-1',
+            label: 'Schedule 1',
+            state: initialState,
+            availabilities: initialAvailabilities,
+            objectives: {
+              global: [],
+              local: [],
+            },
+            createdAt: Date.now(),
+            source: 'manual',
+          },
+        ]
+  );
+  const [activeRosterId, setActiveRosterId] = useState(
+    hasPersistedState ? persistedState.current!.activeRosterId : 'roster-1'
+  );
 
   const [activeTab, setActiveTab] = useState<string>('schedule');
-  const [filterPanelCollapsed, setFilterPanelCollapsed] = useState(true);
+  const [filterPanelCollapsed, setFilterPanelCollapsed] = useState(
+    hasPersistedState ? persistedState.current!.uiPreferences.filterPanelCollapsed : true
+  );
   const [detailPanelOpen, setDetailPanelOpen] = useState(false);
   const [detailContent, setDetailContent] = useState<DetailContent>(null);
   const [detailEditable, setDetailEditable] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<Set<string>>(new Set());
   const [activeCardIndex, setActiveCardIndex] = useState<Record<string, number>>({});
-  const [cardViewMode, setCardViewMode] = useState<CardViewMode>('individual');
-  const [availabilities, setAvailabilities] = useState<PersonAvailability[]>(initialAvailabilities);
-  const [availabilityExpanded, setAvailabilityExpanded] = useState(false);
+  const [cardViewMode, setCardViewMode] = useState<CardViewMode>(
+    hasPersistedState ? persistedState.current!.uiPreferences.cardViewMode : 'individual'
+  );
+  const [availabilities, setAvailabilities] = useState<PersonAvailability[]>(() =>
+    hasPersistedState
+      ? persistedState.current!.rosters.find(r => r.id === persistedState.current!.activeRosterId)
+          ?.availabilities || initialAvailabilities
+      : initialAvailabilities
+  );
+  const [availabilityExpanded, setAvailabilityExpanded] = useState(true);
   const [highlightedSlot, setHighlightedSlot] = useState<{ day: string; timeSlot: string } | null>(null);
+  const [roomsExpanded, setRoomsExpanded] = useState(false);
   const [highlightedPersons, setHighlightedPersons] = useState<string[]>([]);
-  const [toolbarPosition, setToolbarPosition] = useState<'top' | 'right'>('top');
+  const [toolbarPosition, setToolbarPosition] = useState<'top' | 'right'>(
+    hasPersistedState ? persistedState.current!.uiPreferences.toolbarPosition : 'top'
+  );
+  const [detailPanelMode, setDetailPanelMode] = useState<'list' | 'detail'>('detail');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [highlightedEventId, setHighlightedEventId] = useState<string | undefined>(undefined);
+  const [clickCount, setClickCount] = useState<Map<string, number>>(new Map());
+  const clickTimeoutRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const [showGridSetupModal, setShowGridSetupModal] = useState(false);
+  const [showConflictsPanel, setShowConflictsPanel] = useState(false);
 
   // Bottom panel state
-  const [bottomPanelTab, setBottomPanelTab] = useState<'availability' | 'objectives'>('availability');
+  type BottomPanelTab = 'availability' | 'objectives' | 'rooms' | 'conflicts';
+  const [bottomPanelTab, setBottomPanelTab] = useState<BottomPanelTab>('availability');
   const [objectivesExpanded, setObjectivesExpanded] = useState(false);
+  const [conflictsExpanded, setConflictsExpanded] = useState(false);
+  const [sharedPanelHeight, setSharedPanelHeight] = useState(520);
+
+  const clampPanelHeight = useCallback((height: number) => {
+    const maxHeight = typeof window !== 'undefined' ? window.innerHeight * 0.8 : 600;
+    return Math.max(220, Math.min(maxHeight, height));
+  }, []);
+
+  const handleSharedHeightChange = useCallback(
+    (height: number) => {
+      setSharedPanelHeight(prev => {
+        const next = clampPanelHeight(height);
+        return Math.abs(next - prev) < 1 ? prev : next;
+      });
+    },
+    [clampPanelHeight]
+  );
+
+  const handleBottomPanelTabClick = useCallback(
+    (tab: BottomPanelTab) => {
+      if (tab === bottomPanelTab) {
+        switch (tab) {
+          case 'availability':
+            setAvailabilityExpanded(prev => !prev);
+            break;
+          case 'objectives':
+            setObjectivesExpanded(prev => !prev);
+            break;
+          case 'rooms':
+            setRoomsExpanded(prev => !prev);
+            break;
+          case 'conflicts':
+            setConflictsExpanded(prev => !prev);
+            break;
+        }
+        return;
+      }
+
+      setBottomPanelTab(tab);
+      setAvailabilityExpanded(tab === 'availability');
+      setObjectivesExpanded(tab === 'objectives');
+      setRoomsExpanded(tab === 'rooms');
+      setConflictsExpanded(tab === 'conflicts');
+    },
+    [bottomPanelTab]
+  );
 
   // Objectives state
   const [globalObjectives, setGlobalObjectives] = useState<GlobalObjective[]>([
-    { id: 'minimize-gaps', type: 'minimize-gaps', label: 'Minimize schedule gaps', description: 'Reduce idle time between defences', enabled: true, weight: 5 },
-    { id: 'balance-workload', type: 'balance-workload', label: 'Balance workload', description: 'Distribute defences evenly across assessors', enabled: false, weight: 3 },
-    { id: 'preference-satisfaction', type: 'preference-satisfaction', label: 'Satisfy preferences', description: 'Schedule in preferred time slots', enabled: true, weight: 7 },
+    {
+      id: 'adjacency-objective',
+      type: 'adjacency-alignment',
+      label: 'Adjacency objective',
+      description: '',
+      enabled: false,
+      weight: 8,
+    },
+    {
+      id: 'minimize-gaps',
+      type: 'minimize-gaps',
+      label: 'Minimize schedule gaps',
+      description: 'Reduce idle time between defenses',
+      enabled: false,
+      weight: 5,
+    },
+    {
+      id: 'balance-workload',
+      type: 'balance-workload',
+      label: 'Balance workload',
+      description: 'Distribute defenses evenly across assessors',
+      enabled: false,
+      weight: 3,
+    },
+    {
+      id: 'distance-objective',
+      type: 'evaluator-distance',
+      label: 'Minimize evaluator walking distance',
+      description: 'Keep consecutive defenses with the same evaluator in nearby rooms',
+      enabled: false,
+      weight: 6,
+    },
+    {
+      id: 'room-preference',
+      type: 'room-preference',
+      label: 'Evaluator room preferences',
+      description: 'Match defenses to evaluators’ preferred rooms',
+      enabled: false,
+      weight: 4,
+    },
   ]);
   const [localObjectives, setLocalObjectives] = useState<LocalObjective[]>([]);
 
@@ -109,50 +249,65 @@ export function RosterDashboard({
   const timeSlotRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   // Grid structure derived from time horizon or props
-  const [days, setDays] = useState<string[]>(propDays);
-  const [dayLabels, setDayLabels] = useState<string[]>(propDayLabels || propDays);
-  const [timeSlots, setTimeSlots] = useState<string[]>(propTimeSlots);
+  const [days, setDays] = useState<string[]>(
+    hasPersistedState ? persistedState.current!.gridData.days : propDays
+  );
+  const [dayLabels, setDayLabels] = useState<string[]>(
+    hasPersistedState ? persistedState.current!.gridData.dayLabels : propDayLabels || propDays
+  );
+  const [timeSlots, setTimeSlots] = useState<string[]>(
+    hasPersistedState ? persistedState.current!.gridData.timeSlots : propTimeSlots
+  );
+  const roomAvailabilityRooms = useMemo(() => buildRoomAvailabilityRooms(events, days, timeSlots), [events, days, timeSlots]);
   const [gridSource] = useState<'props' | 'timehorizon'>(
     propDays.length > 0 && propTimeSlots.length > 0 ? 'props' : 'timehorizon'
   );
   const [horizonMergeEnabled, setHorizonMergeEnabled] = useState(false);
 
-  const [filters, setFilters] = useState<FilterState>({
-    status: {
-      scheduled: true,
-      unscheduled: true,
-      withConflicts: false,
-    },
-    programmes: [],
-    participantSearch: '',
-  });
+  const [filters, setFilters] = useState<FilterState>(
+    hasPersistedState
+      ? persistedState.current!.filters
+      : {
+          status: {
+            scheduled: true,
+            unscheduled: true,
+            withConflicts: false,
+          },
+          programmes: [],
+          participantSearch: '',
+        }
+  );
 
   // Scheduling context
-  const [schedulingContext, setSchedulingContext] = useState<SchedulingContext>({
-    period: {
-      id: 'fall-2025',
-      label: 'Fall 2025',
-      year: 2025,
-      semester: 'Fall',
-      startDate: '2025-09-01',
-      endDate: '2026-01-31',
-    },
-    department: {
-      id: 'cs',
-      name: 'Computer Science',
-      code: 'CS',
-      faculty: 'Engineering',
-    },
-    taskType: 'thesis-defences',
-    thesisSubtype: 'final',
-    timeHorizon: {
-      startDate: '2025-06-10',
-      endDate: '2025-06-20',
-      startHour: 8,
-      endHour: 17,
-      excludeWeekends: true,
-    },
-  });
+  const [schedulingContext, setSchedulingContext] = useState<SchedulingContext>(
+    hasPersistedState
+      ? persistedState.current!.schedulingContext
+      : {
+          period: {
+            id: 'fall-2025',
+            label: 'Fall 2025',
+            year: 2025,
+            semester: 'Fall',
+            startDate: '2025-09-01',
+            endDate: '2026-01-31',
+          },
+          department: {
+            id: 'cs',
+            name: 'Computer Science',
+            code: 'CS',
+            faculty: 'Engineering',
+          },
+          taskType: 'thesis-defences',
+          thesisSubtype: 'final',
+          timeHorizon: {
+            startDate: '2025-06-10',
+            endDate: '2025-06-20',
+            startHour: 8,
+            endHour: 17,
+            excludeWeekends: true,
+          },
+        }
+  );
 
   const availablePeriods: SchedulingPeriod[] = [
     {
@@ -179,53 +334,123 @@ export function RosterDashboard({
     { id: 'math', name: 'Mathematics', code: 'MATH', faculty: 'Science' },
   ];
 
-  const events = currentState?.events || [];
+  const columnHighlights = useMemo(() => {
+    if (!selectedEvent || highlightedPersons.length === 0) return {};
 
-  // Monitor drag and drop with pragmatic-dnd
+    const targetEvent = events.find(e => e.id === selectedEvent);
+    const persons = availabilities.filter(p => highlightedPersons.includes(p.id));
+    if (persons.length === 0) {
+      if (targetEvent?.day && targetEvent?.startTime) {
+        return { [targetEvent.day]: { [targetEvent.startTime]: 'primary' as const } };
+      }
+      return {};
+    }
+
+    const highlightMap: Record<string, Record<string, 'primary' | 'match'>> = {};
+
+    if (targetEvent?.day && targetEvent?.startTime) {
+      highlightMap[targetEvent.day] = { [targetEvent.startTime]: 'primary' };
+    }
+
+    const getStatus = (person: PersonAvailability, day: string, slot: string): AvailabilityStatus => {
+      const slotValue = person.availability?.[day]?.[slot];
+      if (!slotValue) return 'empty';
+      return typeof slotValue === 'string' ? slotValue : slotValue.status;
+    };
+
+    days.forEach(day => {
+      timeSlots.forEach(slot => {
+        const allAvailable = persons.every(person => getStatus(person, day, slot) === 'available');
+        if (allAvailable) {
+          if (!highlightMap[day]) {
+            highlightMap[day] = {};
+          }
+          if (highlightMap[day][slot] !== 'primary') {
+            highlightMap[day][slot] = 'match';
+          }
+        }
+      });
+    });
+
+    return highlightMap;
+  }, [selectedEvent, highlightedPersons, events, availabilities, days, timeSlots]);
+  const hasColumnHighlighting = useMemo(
+    () =>
+      Object.values(columnHighlights).some(dayMap => dayMap && Object.keys(dayMap).length > 0),
+    [columnHighlights]
+  );
+  const scheduledEventsCount = useMemo(
+    () => events.filter(event => Boolean(event.day && event.startTime)).length,
+    [events]
+  );
+
+  // Auto-persist state with debouncing
+  const { persistNow, clearPersistedState } = usePersistedState(
+    rosters,
+    activeRosterId,
+    schedulingContext,
+    filters,
+    { days, dayLabels, timeSlots },
+    { toolbarPosition, cardViewMode, filterPanelCollapsed }
+  );
+
+  // Show restoration message on first mount if state was restored
+  useEffect(() => {
+    if (hasPersistedState) {
+      const rosterCount = persistedState.current!.rosters.length;
+      const eventCount = rosters.find(r => r.id === activeRosterId)?.state.events.length || 0;
+      showToast.success(
+        `Restored session: ${rosterCount} roster${rosterCount > 1 ? 's' : ''}, ${eventCount} event${eventCount !== 1 ? 's' : ''}`
+      );
+    }
+  }, []); // Only on mount
+
+  // Monitor drag and drop with pragmatic-dnd (stable handler; avoids reattaching each render)
   useEffect(() => {
     return monitorForElements({
       onDrop({ source, location }) {
         const dropTarget = location.current.dropTargets[0];
         if (!dropTarget) return;
 
-        // Extract data from source (dragged card)
         const sourceData = source.data;
         invariant(sourceData.type === 'defence-card');
         invariant(typeof sourceData.eventId === 'string');
 
         const targetData = dropTarget.data;
+        const eventsSnapshot = eventsRef.current;
+        const selectedSnapshot = selectedEventsRef.current;
 
-        // Case 1: Reordering within same timeslot (dropped on another card)
+        const fromUnscheduled = sourceData.sourceLocation === 'unscheduled-panel';
+
         if (targetData.type === 'defence-card') {
-          const sourceEvent = events.find(e => e.id === sourceData.eventId);
-          const targetEvent = events.find(e => e.id === targetData.eventId);
+          if (fromUnscheduled) {
+            const targetEvent = eventsSnapshot.find(e => e.id === targetData.eventId);
+            if (!targetEvent) return;
+            handleDrop(sourceData.eventId, targetEvent.day!, targetEvent.startTime!);
+            return;
+          }
+          const sourceEvent = eventsSnapshot.find(e => e.id === sourceData.eventId);
+          const targetEvent = eventsSnapshot.find(e => e.id === targetData.eventId);
 
           if (!sourceEvent || !targetEvent) return;
 
-          // Check if dragging selected events
-          const isMultiSelect = selectedEvents.has(sourceData.eventId);
-          const eventsToMove = isMultiSelect ? Array.from(selectedEvents) : [sourceData.eventId];
+          const isMultiSelect = selectedSnapshot.has(sourceData.eventId);
+          const eventsToMove = isMultiSelect ? Array.from(selectedSnapshot) : [sourceData.eventId];
 
-          // Only reorder if they're in the same timeslot
           if (sourceEvent.day === targetEvent.day && sourceEvent.startTime === targetEvent.startTime) {
             const closestEdge = extractClosestEdge(targetData);
-
-            // Get all events in this timeslot
-            let cellEvents = events.filter(
+            let cellEvents = eventsSnapshot.filter(
               e => e.day === sourceEvent.day && e.startTime === sourceEvent.startTime
             );
 
             if (isMultiSelect) {
-              // For multi-select, remove all selected events first
               const selectedSet = new Set(eventsToMove);
               const nonSelected = cellEvents.filter(e => !selectedSet.has(e.id));
               const selectedItems = cellEvents.filter(e => selectedSet.has(e.id));
 
-              // Find target position
               const targetIndex = nonSelected.findIndex(e => e.id === targetEvent.id);
               if (targetIndex === -1) return;
 
-              // Insert selected items at target position
               const insertIndex = closestEdge === 'bottom' ? targetIndex + 1 : targetIndex;
               const reorderedCellEvents = [
                 ...nonSelected.slice(0, insertIndex),
@@ -233,24 +458,22 @@ export function RosterDashboard({
                 ...nonSelected.slice(insertIndex),
               ];
 
-              // Update the full events array
               const cellEventsSet = new Set(reorderedCellEvents.map(e => e.id));
               const updatedEvents = [
-                ...events.filter(e => !cellEventsSet.has(e.id)),
+                ...eventsSnapshot.filter(e => !cellEventsSet.has(e.id)),
                 ...reorderedCellEvents,
               ];
 
-              push({
+              pushRef.current({
                 type: 'manual-edit',
                 timestamp: Date.now(),
-                description: `Reordered ${eventsToMove.length} defences in ${sourceEvent.day} ${sourceEvent.startTime}`,
+                description: `Reordered ${eventsToMove.length} defenses in ${sourceEvent.day} ${sourceEvent.startTime}`,
                 data: { eventIds: eventsToMove, targetEventId: targetEvent.id },
               }, {
-                ...currentState!,
+                ...currentStateRef.current!,
                 events: updatedEvents,
               });
             } else {
-              // Single item reorder
               const sourceIndex = cellEvents.findIndex(e => e.id === sourceEvent.id);
               const targetIndex = cellEvents.findIndex(e => e.id === targetEvent.id);
 
@@ -269,31 +492,28 @@ export function RosterDashboard({
                 finishIndex: destinationIndex,
               });
 
-              // Update the full events array
               const cellEventsSet = new Set(reorderedCellEvents.map(e => e.id));
               const updatedEvents = [
-                ...events.filter(e => !cellEventsSet.has(e.id)),
+                ...eventsSnapshot.filter(e => !cellEventsSet.has(e.id)),
                 ...reorderedCellEvents,
               ];
 
-              push({
+              pushRef.current({
                 type: 'manual-edit',
                 timestamp: Date.now(),
                 description: `Reordered ${sourceEvent.student} in ${sourceEvent.day} ${sourceEvent.startTime}`,
                 data: { sourceEventId: sourceEvent.id, targetEventId: targetEvent.id },
               }, {
-                ...currentState!,
+                ...currentStateRef.current!,
                 events: updatedEvents,
               });
             }
           } else {
-            // Different timeslots - treat as move to target's timeslot
             handleDrop(sourceData.eventId, targetEvent.day!, targetEvent.startTime!);
           }
           return;
         }
 
-        // Case 2: Moving to a timeslot
         if (targetData.type === 'time-slot') {
           invariant(typeof targetData.day === 'string');
           invariant(typeof targetData.timeSlot === 'string');
@@ -301,50 +521,46 @@ export function RosterDashboard({
         }
       },
     });
-  }, [currentState, events, selectedEvents, push]);
+  }, []); // stable attachment
 
   // Handler for loading programme data
-  const handleLoadProgrammeData = async (programmeId: string) => {
-    const data = await loadProgrammeData(programmeId);
+  const handleLoadProgrammeData = async (datasetKey: string) => {
+    // datasetKey can be 'ma-ir-cs' or 'ma-ir-cs:intermediate'
+    const data = await loadProgrammeData(datasetKey);
     if (data) {
-      // Extract days and time slots efficiently in one pass
-      const daySet = new Set<string>();
-      const slotSet = new Set<string>();
-      let minHour = 24;
-      let maxHour = 0;
+      let sortedDays: string[];
+      let labels: string[];
+      let completeTimeSlots: string[];
 
-      data.events.forEach(event => {
-        if (event.day) daySet.add(event.day);
-        if (event.startTime) {
-          slotSet.add(event.startTime);
-          const hour = parseInt(event.startTime.split(':')[0]);
-          if (hour < minHour) minHour = hour;
-          if (hour > maxHour) maxHour = hour;
-        }
-      });
+      // Use extracted time horizon if available, otherwise show grid setup modal
+      if (data.extractedTimeHorizon) {
+        // Update scheduling context with extracted time horizon
+        setSchedulingContext(prev => ({
+          ...prev,
+          timeHorizon: {
+            ...data.extractedTimeHorizon!,
+            excludeWeekends: prev.timeHorizon?.excludeWeekends ?? true,
+          },
+        }));
 
-      // Sort once
-      const sortedDays = Array.from(daySet).sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+        // Generate grid from extracted time horizon
+        const generated = generateGridFromTimeHorizon(data.extractedTimeHorizon);
+        sortedDays = generated.days;
+        labels = generated.dayLabels;
+        completeTimeSlots = generated.timeSlots;
 
-      // Use discovered hour range or defaults
-      const startHour = minHour < 24 ? minHour : 8;
-      const endHour = maxHour > 0 ? maxHour + 1 : 17;
+        // Update global grid
+        setDays(sortedDays);
+        setDayLabels(labels);
+        setTimeSlots(completeTimeSlots);
 
-      // Generate complete time slots
-      const completeTimeSlots: string[] = [];
-      for (let hour = startHour; hour <= endHour; hour++) {
-        completeTimeSlots.push(`${hour.toString().padStart(2, '0')}:00`);
+        console.log('✓ Grid auto-generated from extracted time horizon');
+      } else {
+        // No dates found - show grid setup modal
+        console.log('ℹ No dates found in data - prompting for grid configuration');
+        setShowGridSetupModal(true);
+        return; // Wait for user to configure grid
       }
-
-      // Create day labels once
-      const labels = sortedDays.map(day => {
-        const date = new Date(day + 'T00:00:00');
-        return date.toLocaleDateString('en-US', {
-          weekday: 'short',
-          month: 'short',
-          day: 'numeric',
-        });
-      });
 
       const updatedState: ScheduleState = {
         events: data.events,
@@ -379,33 +595,14 @@ export function RosterDashboard({
         );
       });
 
-      // Update global grid to match active roster
-      setDays(sortedDays);
-      setDayLabels(labels);
-      setTimeSlots(completeTimeSlots);
-
       // Update current state and availabilities
       push({
         type: 'manual-edit',
         timestamp: Date.now(),
         description: `Loaded ${data.dataset.description}`,
-        data: { programmeId, eventCount: data.events.length }
+        data: { datasetKey, eventCount: data.events.length }
       }, updatedState);
       setAvailabilities(data.availabilities);
-
-      // Update time horizon to match dataset
-      if (sortedDays.length > 0) {
-        setSchedulingContext(prev => ({
-          ...prev,
-          timeHorizon: {
-            startDate: sortedDays[0],
-            endDate: sortedDays[sortedDays.length - 1],
-            startHour,
-            endHour,
-            excludeWeekends: prev.timeHorizon?.excludeWeekends ?? true,
-          },
-        }));
-      }
 
       // Switch to schedule tab to view loaded data
       setActiveTab('schedule');
@@ -425,31 +622,45 @@ export function RosterDashboard({
     }
   }, [events, filters.programmes.length]);
 
-  // Memoize booking map calculation to avoid recomputation
-  const bookingMap = useMemo(() => {
-    const map = new Map<string, Map<string, string[]>>();
+  const collectEventParticipants = useCallback((event: DefenceEvent): string[] => {
+    const participants: string[] = [];
+    expandParticipantNames(event.student).forEach(name => participants.push(name));
+    expandParticipantNames(event.supervisor).forEach(name => participants.push(name));
+    expandParticipantNames(event.coSupervisor).forEach(name => participants.push(name));
+    if (event.assessors) participants.push(...event.assessors.filter(Boolean));
+    if (event.mentors) participants.push(...event.mentors.filter(Boolean));
+    return participants.filter(Boolean);
+  }, []);
 
+  const eventParticipantCache = useMemo(() => {
+    const cache = new Map<string, { names: string[]; normalized: string[] }>();
     events.forEach(event => {
-      // Defensive: skip events without required data
-      if (!event || !event.day || !event.startTime || !event.id) return;
+      const names = collectEventParticipants(event);
+      cache.set(event.id, {
+        names,
+        normalized: Array.from(
+          new Set(names.map(name => normalizeName(name)).filter(Boolean))
+        ),
+      });
+    });
+    return cache;
+  }, [events, collectEventParticipants]);
 
+  // Derive scheduled slots per participant for availability visualization
+  const scheduledBookings = useMemo(() => {
+    const map = new Map<string, Map<string, string[]>>();
+    const scheduledEvents = events.filter(e => e.day && e.startTime);
+
+    scheduledEvents.forEach(event => {
       const slotKey = `${event.day}_${event.startTime}`;
+      const normalizedParticipants =
+        eventParticipantCache.get(event.id)?.normalized || [];
 
-      // Collect all participants, filtering out nulls/undefined
-      const participants: string[] = [];
-      if (event.student) participants.push(event.student);
-      if (event.supervisor) participants.push(event.supervisor);
-      if (event.coSupervisor) participants.push(event.coSupervisor);
-      if (event.assessors) participants.push(...event.assessors.filter(Boolean));
-      if (event.mentors) participants.push(...event.mentors.filter(Boolean));
-
-      participants.forEach(person => {
-        if (!person) return; // Skip null/empty names
-
-        if (!map.has(person)) {
-          map.set(person, new Map());
+      normalizedParticipants.forEach(personKey => {
+        if (!map.has(personKey)) {
+          map.set(personKey, new Map());
         }
-        const personSlots = map.get(person)!;
+        const personSlots = map.get(personKey)!;
         if (!personSlots.has(slotKey)) {
           personSlots.set(slotKey, []);
         }
@@ -458,105 +669,46 @@ export function RosterDashboard({
     });
 
     return map;
-  }, [events]);
+  }, [events, eventParticipantCache]);
 
-  // Track previous booking map for change detection
-  const prevBookingMapRef = useRef<Map<string, Map<string, string[]>>>();
+  const participantWorkload = useMemo(() => {
+    const map = new Map<string, { required: number; scheduled: number }>();
 
-  // Sync availability grid with schedule only when bookings actually change
-  useEffect(() => {
-    if (events.length === 0 || availabilities.length === 0) return;
+    events.forEach(event => {
+      const isScheduled = Boolean(event.day && event.startTime);
+      const normalizedParticipants =
+        eventParticipantCache.get(event.id)?.normalized || [];
 
-    // Check if bookings actually changed
-    const bookingsChanged = (() => {
-      const prev = prevBookingMapRef.current;
-      if (!prev || prev.size !== bookingMap.size) return true;
-
-      for (const [person, slots] of bookingMap.entries()) {
-        const prevSlots = prev.get(person);
-        if (!prevSlots || prevSlots.size !== slots.size) return true;
-
-        for (const [slotKey, eventIds] of slots.entries()) {
-          const prevEventIds = prevSlots.get(slotKey);
-          if (!prevEventIds ||
-              prevEventIds.length !== eventIds.length ||
-              !prevEventIds.every((id, i) => id === eventIds[i])) {
-            return true;
-          }
+      normalizedParticipants.forEach(name => {
+        if (!map.has(name)) {
+          map.set(name, { required: 0, scheduled: 0 });
         }
-      }
-      return false;
-    })();
-
-    if (!bookingsChanged) return;
-    prevBookingMapRef.current = bookingMap;
-
-    // Reduced timeout for faster feedback (50ms -> 16ms, one frame)
-    const timeoutId = setTimeout(() => {
-      setAvailabilities(prevAvailabilities => {
-        return prevAvailabilities.map(person => {
-          const personSlots = bookingMap.get(person.name);
-          const conflicts: Array<{ day: string; timeSlot: string; conflictingEvents: string[] }> = [];
-
-          // Only update if this person has bookings or had bookings
-          const hadBookings = Object.values(person.availability).some(daySlots =>
-            Object.values(daySlots).some(slot =>
-              typeof slot === 'object' && slot.status === 'booked'
-            )
-          );
-
-          if (!personSlots && !hadBookings) {
-            return person; // No changes for this person
-          }
-
-          const newAvailability = { ...person.availability };
-
-          // Clear all previous 'booked' statuses
-          for (const day in newAvailability) {
-            for (const slot in newAvailability[day]) {
-              const current = newAvailability[day][slot];
-              if (typeof current === 'object' && current.status === 'booked') {
-                newAvailability[day][slot] = { status: 'available', locked: current.locked };
-              }
-            }
-          }
-
-          // Set new 'booked' statuses and detect conflicts
-          if (personSlots) {
-            personSlots.forEach((eventIds, slotKey) => {
-              const [day, slot] = slotKey.split('_');
-
-              // Ensure day exists in availability
-              if (!newAvailability[day]) {
-                newAvailability[day] = {};
-              }
-
-              // Get or create slot - CRITICAL: always book the slot even if it didn't exist before
-              const current = newAvailability[day][slot];
-              const locked = typeof current === 'object' ? current.locked : false;
-              newAvailability[day][slot] = { status: 'booked', locked };
-
-              if (eventIds.length > 1) {
-                conflicts.push({
-                  day,
-                  timeSlot: slot,
-                  conflictingEvents: eventIds,
-                });
-              }
-            });
-          }
-
-          return {
-            ...person,
-            availability: newAvailability,
-            conflicts: conflicts.length > 0 ? conflicts : undefined,
-          };
-        });
+        const stats = map.get(name)!;
+        stats.required += 1;
+        if (isScheduled) {
+          stats.scheduled += 1;
+        }
       });
-    }, 16); // One frame at 60fps for near-instant updates
+    });
 
-    return () => clearTimeout(timeoutId);
-  }, [bookingMap, availabilities.length, events.length]);
+    return map;
+  }, [events, eventParticipantCache]);
+
+  const eventParticipantNames = useMemo(() => {
+    const set = new Set<string>();
+    eventParticipantCache.forEach(({ normalized }) => {
+      normalized.forEach(name => {
+        if (name) set.add(name);
+      });
+    });
+    return set;
+  }, [eventParticipantCache]);
+
+  const visibleAvailabilities = useMemo(() => {
+    if (availabilities.length === 0) return availabilities;
+    if (eventParticipantNames.size === 0) return availabilities;
+    return availabilities.filter(person => eventParticipantNames.has(normalizeName(person.name)));
+  }, [availabilities, eventParticipantNames]);
 
   // Track previous roster sync values for deep change detection
   const prevRosterSyncRef = useRef<{
@@ -569,21 +721,22 @@ export function RosterDashboard({
   useEffect(() => {
     if (!currentState || !activeRosterId) return;
 
-    // Deep equality check for state changes
+    // Fast path: reference equality for immutable data structures
     const stateChanged = (() => {
       const prev = prevRosterSyncRef.current;
-      if (!prev || prev.activeRosterId !== activeRosterId) return true;
-      if (prev.currentState?.events.length !== currentState.events.length) return true;
-      if (prev.availabilities.length !== availabilities.length) return true;
+      if (!prev) return true;
 
-      // Check if events array actually changed (reference check is sufficient due to immutability)
+      // Reference checks are sufficient for immutable state
+      if (prev.activeRosterId !== activeRosterId) return true;
       if (prev.currentState?.events !== currentState.events) return true;
+      if (prev.availabilities !== availabilities) return true;
 
       return false;
     })();
 
     if (!stateChanged) return;
 
+    // Use requestIdleCallback for non-urgent roster sync
     const timeoutId = setTimeout(() => {
       setRosters(prev => {
         const activeRoster = prev.find(r => r.id === activeRosterId);
@@ -740,6 +893,13 @@ export function RosterDashboard({
     }
   }, [schedulingContext.timeHorizon, gridSource, horizonMergeEnabled, propDays, propTimeSlots]);
 
+  // Auto-show grid setup modal when grid is empty
+  useEffect(() => {
+    if (days.length === 0 || timeSlots.length === 0) {
+      setShowGridSetupModal(true);
+    }
+  }, [days.length, timeSlots.length]);
+
   // Detect conflicts between events and availability
   useEffect(() => {
     if (!currentState || !currentState.events || currentState.events.length === 0) {
@@ -790,7 +950,7 @@ export function RosterDashboard({
     }
 
     if (schedulingContext.taskType === 'thesis-defences') {
-      crumbs.push({ label: 'Thesis Defences' });
+      crumbs.push({ label: 'Thesis Defenses' });
       if (schedulingContext.thesisSubtype === 'intermediate') {
         crumbs.push({ label: 'Intermediate' });
       } else {
@@ -835,64 +995,91 @@ export function RosterDashboard({
         return newSet;
       });
     } else {
-      // Use functional update to avoid stale closure and enable instant deselection
+      // Select the event and highlight in sidebar
       setSelectedEvent(prev => {
         // Check if clicking the same event - deselect it
         if (prev === eventId) {
-          setDetailPanelOpen(false);
-          setDetailContent(null);
+          setHighlightedEventId(undefined);
           setHighlightedPersons([]);
-          setHighlightedSlot(null);
           return null;
         } else {
           const event = events.find(e => e.id === eventId);
           if (event) {
-            setDetailContent({
-              type: 'defence',
-              id: event.id,
-              student: {
-                name: event.student,
-                programme: event.programme,
-                thesisTitle: event.title,
-              },
-              supervisor: event.supervisor,
-              coSupervisor: event.coSupervisor,
-              assessors: event.assessors,
-              mentors: event.mentors,
-              scheduledTime: {
-                day: event.day,
-                startTime: event.startTime,
-                endTime: event.endTime,
-                room: event.room || 'TBD',
-              },
-              locked: event.locked,
-            });
-            setDetailPanelOpen(true);
+            // Highlight in sidebar
+            setHighlightedEventId(eventId);
 
-            // Set highlighted persons and slot for availability panel scrolling
+            // Highlight all participants in availability
             const participantNames = getEventParticipants(event);
             const participantIds = availabilities
               .filter(p => participantNames.includes(p.name))
               .map(p => p.id);
             setHighlightedPersons(participantIds);
 
-            // Set highlighted slot if defence is scheduled
-            if (event.day && event.startTime) {
-              setHighlightedSlot({ day: event.day, timeSlot: event.startTime });
-            } else {
-              setHighlightedSlot(null);
-            }
+            // Clear highlight after 3 seconds
+            setTimeout(() => setHighlightedEventId(undefined), 3000);
           }
           return eventId;
         }
       });
     }
     onEventClick?.(eventId);
-  }, [events, availabilities, onEventClick]);
+  }, [events, onEventClick]);
+
+  const handleEventDoubleClick = useCallback((eventId: string) => {
+    const event = events.find(e => e.id === eventId);
+    if (event) {
+      setDetailContent({
+        type: 'defence',
+        id: event.id,
+        student: {
+          name: event.student,
+          programme: event.programme,
+          thesisTitle: event.title,
+        },
+        supervisor: event.supervisor,
+        coSupervisor: event.coSupervisor,
+        assessors: event.assessors,
+        mentors: event.mentors,
+        scheduledTime: {
+          day: event.day,
+          startTime: event.startTime,
+          endTime: event.endTime,
+          room: event.room || 'TBD',
+        },
+        locked: event.locked,
+      });
+      setDetailPanelMode('detail');
+      setDetailEditable(true);
+      setDetailPanelOpen(true);
+
+      // Set highlighted persons and slot for availability panel scrolling
+      const participantNames = new Set(getEventParticipants(event).map(name => normalizeName(name)));
+      const participantIds = availabilities
+        .filter(p => participantNames.has(normalizeName(p.name)))
+        .map(p => p.id);
+      setHighlightedPersons(participantIds);
+
+      // Set highlighted slot if defence is scheduled
+      if (event.day && event.startTime) {
+        setHighlightedSlot({ day: event.day, timeSlot: event.startTime });
+      } else {
+        setHighlightedSlot(null);
+      }
+    }
+  }, [events, availabilities]);
 
   const handleParticipantClick = (personId: string) => {
     const person = availabilities.find(p => p.id === personId);
     if (person) {
+      // Highlight all defenses that include this participant
+      const relatedEventIds = events
+        .filter(e => eventIncludesParticipant(e, person.name))
+        .map(e => e.id);
+
+      setSelectedEvents(new Set(relatedEventIds));
+      setSelectedEvent(relatedEventIds[0] || null);
+      setHighlightedEventId(relatedEventIds[0]);
+
       setDetailContent({
         type: 'participant',
         id: person.id,
@@ -903,78 +1090,236 @@ export function RosterDashboard({
     }
   };
 
-  // Helper function to extract all participants from an event
-  const getEventParticipants = (event: DefenceEvent): string[] => {
-    const participants: string[] = [event.student, event.supervisor];
-    if (event.coSupervisor) participants.push(event.coSupervisor);
-    participants.push(...event.assessors);
-    if (event.mentors) participants.push(...event.mentors);
-    return participants;
+  // Helper function to extract participants with caching
+  const getEventParticipants = useCallback(
+    (event: DefenceEvent): string[] => {
+      return eventParticipantCache.get(event.id)?.names || collectEventParticipants(event);
+    },
+    [eventParticipantCache, collectEventParticipants]
+  );
+
+  const eventIncludesParticipant = (event: DefenceEvent, participantName: string): boolean => {
+    const normalized = normalizeName(participantName);
+    if (!normalized) return false;
+    return getEventParticipants(event).some(name => normalizeName(name) === normalized);
   };
 
-  // Update availability status based on schedule conflicts
-  const updateAvailabilitiesFromSchedule = (events: DefenceEvent[]) => {
-    // Create a map of person -> time slots where they're booked
-    const bookingMap = new Map<string, Set<string>>();
+  const normalizeConflicts = (rawConflicts: any[] = []): Conflict[] => {
+    return rawConflicts.map((c, idx) => {
+      const id =
+        c.id ||
+        c.conflict_id ||
+        c.constraint_id ||
+        `${c.type || 'conflict'}-${idx}-${Date.now()}`;
 
-    // First pass: collect all bookings
-    events.forEach(event => {
-      if (event.day && event.startTime) {
-        const slotKey = `${event.day}_${event.startTime}`;
-        const participants = getEventParticipants(event);
-
-        participants.forEach(person => {
-          if (!bookingMap.has(person)) {
-            bookingMap.set(person, new Set());
-          }
-          bookingMap.get(person)!.add(slotKey);
-        });
-      }
-    });
-
-    // Update availabilities to reflect bookings
-    const updatedAvailabilities = availabilities.map(person => {
-      const newAvailability = { ...person.availability };
-      const personBookings = bookingMap.get(person.name) || new Set();
-
-      // Clear all previous 'booked' statuses
-      Object.keys(newAvailability).forEach(day => {
-        Object.keys(newAvailability[day]).forEach(slot => {
-          const current = newAvailability[day][slot];
-          if (typeof current === 'object' && current.status === 'booked') {
-            newAvailability[day][slot] = { status: 'available', locked: current.locked };
-          }
-        });
-      });
-
-      // Set new 'booked' statuses
-      personBookings.forEach(slotKey => {
-        const [day, slot] = slotKey.split('_');
-        if (newAvailability[day]?.[slot]) {
-          const current = newAvailability[day][slot];
-          const locked = typeof current === 'object' ? current.locked : false;
-          newAvailability[day][slot] = { status: 'booked', locked };
-        }
-      });
+      const affected = c.affected_defence_ids || c.affectedDefenceIds || [];
+      const participants = c.participants || c.persons || c.people || [];
+      const suggestions = (c.suggestions || []).map((s: any, sIdx: number) => ({
+        id: s.id || `${id}-sugg-${sIdx}`,
+        label: s.label || s.action || 'Suggestion',
+        description: s.description,
+        action: s.action || 'apply',
+        payload: s.payload || {},
+      }));
 
       return {
-        ...person,
-        availability: newAvailability,
+        id,
+        type: c.type || 'other',
+        message: c.message || c.description || 'Constraint violation',
+        affectedDefenceIds: Array.isArray(affected) ? affected : [affected],
+        participants: Array.isArray(participants) ? participants : [participants],
+        room: c.room || c.room_id,
+        day: c.day || c.date,
+        timeSlot: c.time_slot || c.timeSlot,
+        severity: c.severity || 'error',
+        constraintId: c.constraint_id || c.constraintId,
+        suggestions,
       };
     });
-
-    setAvailabilities(updatedAvailabilities);
   };
 
+  const severityRank: Record<ConflictSeverity, number> = {
+    error: 3,
+    warning: 2,
+    info: 1,
+  };
+
+  // Local conflict detection when backend hasn't provided conflicts
+  const derivedConflicts = useMemo(() => {
+    const conflicts: Conflict[] = [];
+
+    // Helper to fetch availability status
+    const availabilityMap = new Map<string, PersonAvailability>();
+    availabilities.forEach(p => availabilityMap.set(p.name, p));
+
+    const participantConflicts = new Map<string, Map<string, string[]>>(); // person -> slotKey -> eventIds
+
+    events.forEach(evt => {
+      if (!evt.day || !evt.startTime) return;
+      const participants = getEventParticipants(evt);
+      const slotKey = `${evt.day}:${evt.startTime}`;
+
+      // Double booking map
+      participants.forEach(person => {
+        if (!participantConflicts.has(person)) {
+          participantConflicts.set(person, new Map());
+        }
+        const slots = participantConflicts.get(person)!;
+        if (!slots.has(slotKey)) slots.set(slotKey, []);
+        slots.get(slotKey)!.push(evt.id);
+      });
+
+      // Availability violation: only when explicitly marked unavailable
+      participants.forEach(person => {
+        const avail = availabilityMap.get(person);
+        const statusRaw = avail?.availability?.[evt.day]?.[evt.startTime];
+        const status = typeof statusRaw === 'object' ? statusRaw.status : statusRaw;
+        if (status === 'unavailable') {
+          conflicts.push({
+            id: `av-${evt.id}-${person}-${slotKey}`,
+            type: 'availability-violation',
+            message: `${person} unavailable at ${slotKey}`,
+            affectedDefenceIds: [evt.id],
+            participants: [person],
+            day: evt.day,
+            timeSlot: evt.startTime,
+            severity: 'error',
+          });
+        }
+      });
+    });
+
+    // Add double-booking conflicts
+    participantConflicts.forEach((slots, person) => {
+      slots.forEach((eventIds, slotKey) => {
+        if (eventIds.length > 1) {
+          const [day, timeSlot] = slotKey.split(':');
+          conflicts.push({
+            id: `db-${person}-${slotKey}`,
+            type: 'double-booking',
+            message: `${person} has multiple defenses at ${slotKey}`,
+            affectedDefenceIds: eventIds,
+            participants: [person],
+            day,
+            timeSlot,
+            severity: 'error',
+          });
+        }
+      });
+    });
+
+    return conflicts;
+  }, [events, availabilities]);
+
+  const conflictSource = currentState?.conflicts?.length ? currentState.conflicts : derivedConflicts;
+
+  const { eventConflictsMap, personSlotConflictsMap } = useMemo(() => {
+    const eventConflicts = new Map<string, Conflict[]>();
+    const personSlotConflicts = new Map<string, Conflict[]>();
+
+    if (conflictSource?.length) {
+      // Index conflicts by event and person/slot
+      conflictSource.forEach(conflict => {
+        conflict.affectedDefenceIds.forEach(id => {
+          if (!eventConflicts.has(id)) eventConflicts.set(id, []);
+          eventConflicts.get(id)!.push(conflict);
+        });
+
+        const participantList = conflict.participants && conflict.participants.length > 0
+          ? conflict.participants
+          : [];
+
+        // If conflict provides day/time directly, use them
+        if (conflict.day && conflict.timeSlot && participantList.length > 0) {
+          participantList.forEach(person => {
+            const key = `${person}_${conflict.day}_${conflict.timeSlot}`;
+            if (!personSlotConflicts.has(key)) personSlotConflicts.set(key, []);
+            personSlotConflicts.get(key)!.push(conflict);
+          });
+        }
+      });
+    }
+
+    // Map conflicts onto person-slot using events' positions
+    events.forEach(evt => {
+      if (!evt.day || !evt.startTime || !evt.conflicts?.length) return;
+      const participants = [
+        ...expandParticipantNames(evt.student),
+        ...expandParticipantNames(evt.supervisor),
+        ...expandParticipantNames(evt.coSupervisor),
+        ...(evt.assessors || []),
+        ...(evt.mentors || []),
+      ].filter(Boolean);
+      evt.conflicts.forEach(conflictId => {
+        const conflictList = conflictSource || [];
+        const found = conflictList.find(c => c.id === conflictId);
+        if (found) {
+          // Fill person-slot map using event context when conflict lacks explicit participants
+          const conflictParticipants = found.participants && found.participants.length > 0
+            ? found.participants
+            : participants;
+          if (evt.day && evt.startTime) {
+            conflictParticipants.forEach(person => {
+              const key = `${person}_${evt.day}_${evt.startTime}`;
+              if (!personSlotConflicts.has(key)) personSlotConflicts.set(key, []);
+              personSlotConflicts.get(key)!.push(found);
+            });
+          }
+        }
+      });
+    });
+
+    return { eventConflictsMap: eventConflicts, personSlotConflictsMap: personSlotConflicts };
+  }, [conflictSource, events]);
+
+  const getEventConflictMeta = useCallback(
+    (eventId: string): { count: number; severity?: ConflictSeverity; hasDoubleBooking: boolean; doubleBookingCount: number } => {
+      const conflicts = eventConflictsMap.get(eventId) || [];
+      const count = conflicts.length;
+      const doubleBookingCount = conflicts.filter(c => c.type === 'double-booking').length;
+      const severity = conflicts.reduce<ConflictSeverity | undefined>((acc, conflict) => {
+        if (!acc) return conflict.severity;
+        return severityRank[conflict.severity] > severityRank[acc] ? conflict.severity : acc;
+      }, undefined);
+      const hasDoubleBooking = doubleBookingCount > 0;
+      return { count, severity, hasDoubleBooking, doubleBookingCount };
+    },
+    [eventConflictsMap, severityRank]
+  );
+
+  const handleApplySuggestion = (suggestion: any) => {
+    logger.debug('Apply suggestion', suggestion);
+    showToast.success(suggestion.label || 'Applied suggestion');
+  };
+
+  // Keep live references for drag handlers to avoid re-attaching listeners on every render
+  const eventsRef = useRef(events);
+  const selectedEventsRef = useRef(selectedEvents);
+  const currentStateRef = useRef(currentState);
+  const pushRef = useRef(push);
+
+  useEffect(() => {
+    eventsRef.current = events;
+    selectedEventsRef.current = selectedEvents;
+    currentStateRef.current = currentState;
+    pushRef.current = push;
+  }, [events, selectedEvents, currentState, push]);
+
+  // Dedicated controller to cancel stale validation requests
+  const validationControllerRef = useRef<AbortController | null>(null);
+
   const handleDrop = async (eventId: string, day: string, timeSlot: string) => {
-    if (!currentState) return;
+    if (!currentStateRef.current) return;
+
+    // Clear slot highlights once a drop action is committed
+    setHighlightedSlot(null);
 
     // If multiple events are selected and the dragged event is one of them, move all selected events
-    const eventsToMove = selectedEvents.has(eventId)
-      ? Array.from(selectedEvents)
+    const eventsToMove = selectedEventsRef.current.has(eventId)
+      ? Array.from(selectedEventsRef.current)
       : [eventId];
 
-    const updatedEvents = currentState.events.map(e => {
+    const updatedEvents = currentStateRef.current.events.map(e => {
       if (eventsToMove.includes(e.id)) {
         return {
           ...e,
@@ -985,70 +1330,81 @@ export function RosterDashboard({
       return e;
     });
 
-    // Update availability status immediately to reflect the schedule change
-    updateAvailabilitiesFromSchedule(updatedEvents);
+    // Optimistically update UI immediately
+    const optimisticState: ScheduleState = {
+      ...currentStateRef.current!,
+      events: updatedEvents,
+    };
 
-    // Validate with backend
+    const action: ScheduleAction = {
+      type: 'drag-defence',
+      timestamp: Date.now(),
+      description: eventsToMove.length > 1
+        ? `Moved ${eventsToMove.length} defenses to ${day} ${timeSlot}`
+        : `Moved defense ${eventId} to ${day} ${timeSlot}`,
+      data: { eventId, eventsToMove, newDay: day, newTimeSlot: timeSlot },
+    };
+
+    pushRef.current(action, optimisticState);
+
+    // Cancel any in-flight validation
+    if (validationControllerRef.current) {
+      validationControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    validationControllerRef.current = controller;
+
+    // Validate with backend in background
     try {
       const response = await fetch('http://localhost:8000/api/schedule/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ events: updatedEvents }),
+        signal: controller.signal,
       });
 
       const result = await response.json();
 
-      // Always update conflicts, even if empty (to clear previous conflicts)
-      const conflicts = result.conflicts || [];
-      const conflictIds = new Set(
-        conflicts.flatMap((c: any) => c.affected_defence_ids || [])
-      );
+      // Normalize conflicts from backend for UI consumption
+      const normalizedConflicts = normalizeConflicts(result.conflicts || []);
+      const conflictsByEvent = new Map<string, Conflict[]>();
+      normalizedConflicts.forEach(conflict => {
+        conflict.affectedDefenceIds.forEach(id => {
+          if (!conflictsByEvent.has(id)) {
+            conflictsByEvent.set(id, []);
+          }
+          conflictsByEvent.get(id)!.push(conflict);
+        });
+      });
 
-      const eventsWithConflicts = updatedEvents.map(event => ({
-        ...event,
-        conflicts: conflictIds.has(event.id)
-          ? conflicts
-              .filter((c: any) => c.affected_defence_ids?.includes(event.id))
-              .map((c: any) => c.type)
-          : [],
-      }));
+      const eventsWithConflicts = updatedEvents.map(event => {
+        const eventConflicts = conflictsByEvent.get(event.id) || [];
+        return {
+          ...event,
+          conflicts: eventConflicts.map(c => c.id),
+        };
+      });
 
       const validatedState: ScheduleState = {
-        ...currentState,
+        ...currentStateRef.current!,
         events: eventsWithConflicts,
-        conflicts: conflicts,
+        conflicts: normalizedConflicts,
       };
 
-      const action: ScheduleAction = {
-        type: 'drag-defence',
-        timestamp: Date.now(),
-        description: eventsToMove.length > 1
-          ? `Moved ${eventsToMove.length} defences to ${day} ${timeSlot}${conflicts.length > 0 ? ' - conflicts detected' : ''}`
-          : `Moved defence ${eventId} to ${day} ${timeSlot}${conflicts.length > 0 ? ' - conflicts detected' : ''}`,
-        data: { eventId, eventsToMove, newDay: day, newTimeSlot: timeSlot },
-      };
-
-      push(action, validatedState);
-    } catch (error) {
+      // Only update history if conflicts are detected to avoid double entries
+      if (normalizedConflicts.length > 0) {
+        const conflictAction: ScheduleAction = {
+          type: 'validation-update',
+          timestamp: Date.now(),
+          description: `Conflicts detected after move to ${day} ${timeSlot}`,
+          data: { eventId, eventsToMove, conflicts: normalizedConflicts },
+        };
+        startTransition(() => pushRef.current(conflictAction, validatedState));
+      }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return; // Stale validation
       logger.error('Validation failed:', error);
       showToast.error('Failed to validate schedule. Please try again.');
-
-      // Still push the state even if validation fails
-      const action: ScheduleAction = {
-        type: 'drag-defence',
-        timestamp: Date.now(),
-        description: eventsToMove.length > 1
-          ? `Moved ${eventsToMove.length} defences to ${day} ${timeSlot}`
-          : `Moved defence ${eventId} to ${day} ${timeSlot}`,
-        data: { eventId, eventsToMove, newDay: day, newTimeSlot: timeSlot },
-      };
-
-      const newState: ScheduleState = {
-        ...currentState,
-        events: updatedEvents,
-      };
-
-      push(action, newState);
     }
   };
 
@@ -1065,7 +1421,7 @@ export function RosterDashboard({
     const action: ScheduleAction = {
       type: currentState.events.find(e => e.id === eventId)?.locked ? 'unlock-defence' : 'lock-defence',
       timestamp: Date.now(),
-      description: `Toggled lock for defence ${eventId}`,
+      description: `Toggled lock for defense ${eventId}`,
       data: { eventId },
     };
 
@@ -1076,11 +1432,8 @@ export function RosterDashboard({
   }, [currentState, push]);
 
   const handleAvailabilitySlotClick = (personId: string, day: string, timeSlot: string) => {
-    // Set highlighted slot
+    // Set highlighted slot (persists until another click clears it)
     setHighlightedSlot({ day, timeSlot });
-
-    // Clear highlight after 3 seconds
-    setTimeout(() => setHighlightedSlot(null), 3000);
 
     // Scroll to the corresponding row in the main schedule grid
     const rowElement = timeSlotRefs.current.get(timeSlot);
@@ -1095,13 +1448,9 @@ export function RosterDashboard({
     if (cellEvents.length > 1) {
       // Find event with this person
       const eventIndex = cellEvents.findIndex(event => {
-        const participants = [event.student, event.supervisor];
-        if (event.coSupervisor) participants.push(event.coSupervisor);
-        participants.push(...event.assessors);
-        if (event.mentors) participants.push(...event.mentors);
-
         const person = availabilities.find(p => p.id === personId);
-        return person && participants.includes(person.name);
+        if (!person) return false;
+        return eventIncludesParticipant(event, person.name);
       });
 
       if (eventIndex !== -1) {
@@ -1112,6 +1461,48 @@ export function RosterDashboard({
       }
     }
   };
+
+  const clearSelectionState = useCallback(() => {
+    setSelectedEvent(null);
+    setSelectedEvents(new Set());
+    setHighlightedPersons([]);
+    setHighlightedSlot(null);
+    setHighlightedEventId(undefined);
+  }, []);
+
+  useEffect(() => {
+    const handler = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-availability-slot="true"]')) {
+        return;
+      }
+      if (target.closest('[data-prevent-clear="true"]')) {
+        return;
+      }
+      if (
+        !selectedEvent &&
+        selectedEvents.size === 0 &&
+        highlightedPersons.length === 0 &&
+        !highlightedSlot &&
+        !highlightedEventId
+      ) {
+        return;
+      }
+      clearSelectionState();
+    };
+    document.addEventListener('pointerdown', handler, { capture: true });
+    return () => {
+      document.removeEventListener('pointerdown', handler, { capture: true });
+    };
+  }, [
+    clearSelectionState,
+    selectedEvent,
+    selectedEvents,
+    highlightedPersons,
+    highlightedSlot,
+    highlightedEventId,
+  ]);
 
   const handleAvailabilitySlotEdit = (
     personId: string,
@@ -1171,6 +1562,33 @@ export function RosterDashboard({
     setAvailabilities(updatedAvailabilities);
   };
 
+  const handleUnscheduleSelection = () => {
+    if (!currentState || selectedEvents.size === 0) return;
+
+    const unscheduledEvents = currentState.events.map(e => {
+      if (selectedEvents.has(e.id)) {
+        const { day, startTime, endTime, room, ...rest } = e;
+        return rest as DefenceEvent;
+      }
+      return e;
+    });
+
+    const action: ScheduleAction = {
+      type: 'manual-edit',
+      timestamp: Date.now(),
+      description: `Unscheduled ${selectedEvents.size} defense(s)`,
+      data: { unscheduledIds: Array.from(selectedEvents) },
+    };
+
+    push(action, {
+      ...currentState,
+      events: unscheduledEvents,
+    });
+
+    setSelectedEvents(new Set());
+    showToast.success(`Unscheduled ${selectedEvents.size} defense(s)`);
+  };
+
   const handleDeleteSelection = () => {
     if (!currentState || selectedEvents.size === 0) return;
 
@@ -1180,7 +1598,7 @@ export function RosterDashboard({
     const action: ScheduleAction = {
       type: 'manual-edit',
       timestamp: Date.now(),
-      description: `Deleted ${deletedIds.length} defence(s)`,
+      description: `Deleted ${deletedIds.length} defense(s)`,
       data: { deletedIds },
     };
 
@@ -1198,7 +1616,7 @@ export function RosterDashboard({
     const action: ScheduleAction = {
       type: 'manual-edit',
       timestamp: Date.now(),
-      description: 'Deleted all defences',
+      description: 'Deleted all defenses',
       data: { deletedCount: currentState.events.length },
     };
 
@@ -1218,7 +1636,7 @@ export function RosterDashboard({
     const action: ScheduleAction = {
       type: 'manual-edit',
       timestamp: Date.now(),
-      description: `Deleted defence ${defenceId}`,
+      description: `Deleted defense ${defenceId}`,
       data: { deletedId: defenceId },
     };
 
@@ -1240,7 +1658,7 @@ export function RosterDashboard({
       supervisor: 'Supervisor TBD',
       assessors: [],
       mentors: [],
-      title: 'New Defence',
+      title: 'New Defense',
       programme: 'CS',
       locked: false,
       day: prefilledDay || '',
@@ -1272,6 +1690,136 @@ export function RosterDashboard({
     });
     setDetailEditable(true);
     setDetailPanelOpen(true);
+  };
+
+  const handleShowUnscheduled = () => {
+    setDetailPanelMode('list');
+    setDetailPanelOpen(true);
+    setSearchQuery('');
+  };
+
+  const handleUnscheduledCardClick = (event: DefenceEvent) => {
+    const eventId = event.id;
+    const currentCount = clickCount.get(eventId) || 0;
+    const newCount = currentCount + 1;
+
+    // Update click count
+    const newClickCount = new Map(clickCount);
+    newClickCount.set(eventId, newCount);
+    setClickCount(newClickCount);
+
+    // Clear existing timeout for this event
+    const existingTimeout = clickTimeoutRef.current.get(eventId);
+    if (existingTimeout) clearTimeout(existingTimeout);
+
+    // Reset count after 500ms of inactivity
+    const timeout = setTimeout(() => {
+      const resetMap = new Map(clickCount);
+      resetMap.delete(eventId);
+      setClickCount(resetMap);
+      clickTimeoutRef.current.delete(eventId);
+    }, 500);
+
+    clickTimeoutRef.current.set(eventId, timeout);
+
+    if (newCount === 1) {
+      // FIRST CLICK: Highlight + bring to front
+      handleEventClick(event.id);
+      setHighlightedEventId(event.id);
+
+      if (event.day && event.startTime) {
+        // Auto bring-to-front logic
+        const cellKey = getCellKey(event.day, event.startTime);
+        const cellEvents = getEventsForCell(event.day, event.startTime);
+        const eventIndex = cellEvents.findIndex(e => e.id === event.id);
+
+        if (eventIndex !== -1) {
+          setActiveCardIndex(prev => ({
+            ...prev,
+            [cellKey]: eventIndex,
+          }));
+        }
+
+        // Scroll to position
+        setTimeout(() => {
+          const cardElement = document.querySelector(`[data-event-id="${event.id}"]`);
+          if (cardElement) {
+            cardElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+          }
+        }, 100);
+      }
+    } else if (newCount === 2) {
+      // SECOND CLICK: Open detail panel
+      setDetailPanelMode('detail');
+      setSelectedEvent(event.id);
+      setDetailContent({
+        type: 'defence',
+        id: event.id,
+        student: {
+          name: event.student,
+          programme: event.programme,
+          thesisTitle: event.title,
+        },
+        supervisor: event.supervisor,
+        coSupervisor: event.coSupervisor,
+        assessors: event.assessors,
+        mentors: event.mentors,
+        scheduledTime: event.day && event.startTime ? {
+          day: event.day,
+          startTime: event.startTime,
+          endTime: event.endTime,
+          room: event.room || '',
+        } : undefined,
+        locked: event.locked,
+      });
+      setDetailEditable(true);
+      setDetailPanelOpen(true);
+
+      // Extract all participants from the event and highlight them in availability panel
+      const participantNames = new Set(getEventParticipants(event).map(name => normalizeName(name)));
+      const participantIds = availabilities
+        .filter(p => participantNames.has(normalizeName(p.name)))
+        .map(p => p.id);
+      setHighlightedPersons(participantIds);
+
+      // Clear highlight and reset count
+      setTimeout(() => setHighlightedEventId(undefined), 300);
+      const resetMap = new Map(clickCount);
+      resetMap.delete(eventId);
+      setClickCount(resetMap);
+    }
+  };
+
+  const handleAddNewUnscheduled = () => {
+    if (!currentState) return;
+
+    const newDefence: DefenceEvent = {
+      id: `defence-${Date.now()}`,
+      student: 'New Student',
+      supervisor: 'Supervisor TBD',
+      assessors: [],
+      mentors: [],
+      title: 'New Defense',
+      programme: 'CS',
+      locked: false,
+      day: '',
+      startTime: '',
+      endTime: '',
+    };
+
+    const action: ScheduleAction = {
+      type: 'manual-edit',
+      timestamp: Date.now(),
+      description: 'Added new unscheduled defense',
+      data: { defenceId: newDefence.id },
+    };
+
+    push(action, {
+      ...currentState,
+      events: [...currentState.events, newDefence],
+    });
+
+    handleUnscheduledCardClick(newDefence);
   };
 
   // Roster management handlers
@@ -1428,7 +1976,7 @@ export function RosterDashboard({
     const action: ScheduleAction = {
       type: 'manual-edit',
       timestamp: Date.now(),
-      description: existingIndex >= 0 ? `Updated defence ${defenceEvent.id}` : `Added new defence`,
+      description: existingIndex >= 0 ? `Updated defense ${defenceEvent.id}` : `Added new defense`,
       data: { defenceId: defenceEvent.id },
     };
 
@@ -1450,147 +1998,249 @@ export function RosterDashboard({
     setHorizonMergeEnabled(true);
   };
 
+  const handleGridSetupSubmit = (newHorizon: TimeHorizon) => {
+    setSchedulingContext(prev => ({
+      ...prev,
+      timeHorizon: newHorizon,
+    }));
+    setShowGridSetupModal(false);
+  };
+
+  // Optimize filteredEvents with stable filter references
   const filteredEvents = useMemo(() => {
+    // Early return if no filters active (common case)
+    const hasActiveFilters =
+      !filters.status.scheduled ||
+      !filters.status.unscheduled ||
+      filters.programmes.length !== Array.from(new Set(events.map(e => e.programme))).length ||
+      filters.participantSearch.length > 0;
+
+    if (!hasActiveFilters) return events;
+
+    // Apply filters sequentially with early exits
     return events.filter(event => {
-      const isScheduled = event.startTime && event.endTime;
+      // Status filter (most selective first)
+      const isScheduled = Boolean(event.startTime && event.endTime);
       if (!filters.status.scheduled && isScheduled) return false;
       if (!filters.status.unscheduled && !isScheduled) return false;
+
+      // Programme filter
       if (!filters.programmes.includes(event.programme)) return false;
+
+      // Participant search (most expensive, do last)
       if (filters.participantSearch) {
         const search = filters.participantSearch.toLowerCase();
-        const searchableText = [
-          event.student,
-          event.supervisor,
-          event.coSupervisor || '',
-          ...event.assessors,
-          ...event.mentors,
-        ].join(' ').toLowerCase();
-        if (!searchableText.includes(search)) return false;
+        // Check individual fields directly instead of creating array
+        if (event.student.toLowerCase().includes(search)) return true;
+        if (event.supervisor.toLowerCase().includes(search)) return true;
+        if (event.coSupervisor?.toLowerCase().includes(search)) return true;
+        if (event.assessors.some(a => a.toLowerCase().includes(search))) return true;
+        if (event.mentors.some(m => m.toLowerCase().includes(search))) return true;
+        return false;
       }
+
       return true;
     });
-  }, [events, filters]);
+  }, [events, filters.status.scheduled, filters.status.unscheduled, filters.programmes, filters.participantSearch]);
 
   const stats = useMemo(() => ({
     total: events.length,
     scheduled: events.filter(e => e.startTime && e.endTime).length,
     unscheduled: events.filter(e => !e.startTime || !e.endTime).length,
-    conflicts: currentState?.conflicts.length || 0,
-  }), [events, currentState?.conflicts]);
+    conflicts: conflictSource.length,
+  }), [events, conflictSource]);
+
+  // All events for sidebar (not just unscheduled)
+  const sidebarEvents = useMemo(() => {
+    return filteredEvents;
+  }, [filteredEvents]);
 
   // Map rosters to availability roster format for multi-roster view
   const availabilityRosters = useMemo<RosterInfo[]>(() => {
-    return rosters.map(roster => ({
-      id: roster.id,
-      label: roster.label,
-      availabilities: roster.availabilities,
-    }));
+    return rosters.map(roster => {
+      const rosterParticipants = new Set<string>();
+      const addParticipant = (name: string | undefined) => {
+        expandParticipantNames(name).forEach(n => {
+          const normalized = normalizeName(n);
+          if (normalized) {
+            rosterParticipants.add(normalized);
+          }
+        });
+      };
+      roster.state.events.forEach(event => {
+        addParticipant(event.student);
+        addParticipant(event.supervisor);
+        addParticipant(event.coSupervisor);
+        event.assessors?.forEach(addParticipant);
+        event.mentors?.forEach(addParticipant);
+      });
+
+      const filteredAvailability = rosterParticipants.size === 0
+        ? roster.availabilities
+        : roster.availabilities.filter(person => rosterParticipants.has(normalizeName(person.name)));
+
+      return {
+        id: roster.id,
+        label: roster.label,
+        availabilities: filteredAvailability,
+      };
+    });
   }, [rosters]);
 
   // Memoize roster list for toolbar to prevent unnecessary re-renders
   const toolbarRosters = useMemo(() => rosters.map(r => ({ id: r.id, label: r.label })), [rosters]);
 
-  const getCellKey = (day: string, time: string) => `${day}-${time}`;
+  const getCellKey = useCallback((day: string, time: string) => `${day}-${time}`, []);
 
+  // Optimize eventsByCell with pre-allocated map and single-pass iteration
   const eventsByCell = useMemo(() => {
     const map = new Map<string, DefenceEvent[]>();
-    filteredEvents.forEach(event => {
-      if (event.day && event.startTime) {
-        const key = getCellKey(event.day, event.startTime);
-        if (!map.has(key)) {
-          map.set(key, []);
-        }
-        map.get(key)!.push(event);
+
+    // Single-pass iteration with pre-filtering
+    for (const event of filteredEvents) {
+      if (!event.day || !event.startTime) continue;
+
+      const key = `${event.day}-${event.startTime}`;
+      const events = map.get(key);
+
+      if (events) {
+        events.push(event);
+      } else {
+        map.set(key, [event]);
       }
-    });
+    }
+
     return map;
   }, [filteredEvents]);
 
-  const getEventsForCell = (day: string, time: string) => {
-    return eventsByCell.get(getCellKey(day, time)) || [];
-  };
+  const getEventsForCell = useCallback((day: string, time: string) => {
+    return eventsByCell.get(`${day}-${time}`) || [];
+  }, [eventsByCell]);
 
-  const getActiveIndex = (day: string, time: string) => {
-    const key = getCellKey(day, time);
+  const getActiveIndex = useCallback((day: string, time: string) => {
+    const key = `${day}-${time}`;
     return activeCardIndex[key] || 0;
-  };
+  }, [activeCardIndex]);
 
-  const colorScheme: Record<string, string> = {
+  // Color scheme state with handler for FilterPanel
+  const [colorScheme, setColorScheme] = useState<Record<string, string>>({
     TI: '#6bc7eeff',
     CS: '#658fc0ff',
+    DH: '#c3aff1ff',
+    CW: '#98a084ff',
+  });
+
+  const handleColorChange = (programme: string, color: string) => {
+    console.log('Color change requested:', { programme, color });
+    setColorScheme(prev => {
+      const newScheme = {
+        ...prev,
+        [programme]: color,
+      };
+      console.log('New color scheme:', newScheme);
+      return newScheme;
+    });
   };
 
   const renderScheduleGrid = () => {
     // Show message only if no grid structure exists
     if (days.length === 0 || timeSlots.length === 0) {
       return (
-        <div className="flex-1 p-6 overflow-auto bg-gray-50">
-          <div className="max-w-4xl mx-auto text-center py-12 text-gray-500">
-            <p className="text-lg font-medium mb-2">No schedule grid configured</p>
-            <p className="text-sm">Configure the time horizon in the Setup tab to create a schedule grid.</p>
+        <>
+          <GridSetupModal
+            isOpen={showGridSetupModal}
+            onClose={() => setShowGridSetupModal(false)}
+            onSubmit={handleGridSetupSubmit}
+            initialHorizon={schedulingContext.timeHorizon}
+          />
+          <div className="flex-1 p-6 overflow-auto bg-gray-50">
+            <div className="max-w-4xl mx-auto text-center py-12 text-gray-500">
+              <p className="text-lg font-medium mb-2">No schedule grid configured</p>
+              <p className="text-sm">Configure the time horizon to create a schedule grid.</p>
+              <button
+                onClick={() => setShowGridSetupModal(true)}
+                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              >
+                Configure Grid
+              </button>
+            </div>
           </div>
-        </div>
+        </>
       );
     }
 
     return (
       <>
         <div className="flex-1 overflow-auto">
-          <div className="w-full border rounded-lg bg-white">
+          <div className="inline-block min-w-full border rounded-lg bg-white">
             {/* Grid */}
-            <div className="min-w-max">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-50">
-                    <th className="border border-gray-200 border-r-2 border-r-gray-300 p-3 text-left font-semibold sticky left-0 z-10 bg-gray-100">
-                      Time / Day
-                    </th>
-                    {days.map((day, idx) => (
-                      <th
-                        key={day}
-                        className="border border-gray-200 p-3 text-center font-semibold min-w-[200px]"
-                      >
-                        {dayLabels?.[idx] || day}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {timeSlots.map((time) => (
-                    <tr
-                      key={time}
-                      className="bg-white"
-                      ref={(el) => {
-                        if (el) {
-                          timeSlotRefs.current.set(time, el);
-                        } else {
-                          timeSlotRefs.current.delete(time);
-                        }
+            <table
+              className="border-collapse"
+              style={{ width: '100%', tableLayout: 'fixed' }}
+            >
+              <thead>
+                <tr className="bg-gray-50">
+                  <th className="border border-gray-200 border-r-2 border-r-gray-300 p-3 text-left font-semibold sticky left-0 z-30 bg-gray-100" style={{ width: '80px', minWidth: '80px', maxWidth: '80px' }}>
+
+                  </th>
+                  {days.map((day, idx) => (
+                    <th
+                      key={day}
+                      className="border border-gray-200 p-3 text-center font-semibold"
+                      style={{
+                        width: `${SCHEDULE_COLUMN_WIDTH}px`,
+                        minWidth: `${SCHEDULE_COLUMN_WIDTH}px`,
+                        maxWidth: `${SCHEDULE_COLUMN_WIDTH}px`,
                       }}
                     >
-                      <td className="border border-gray-200 border-r-2 border-r-gray-300 p-3 font-medium sticky left-0 z-10 bg-gray-50">
-                        {time}
-                      </td>
+                      {dayLabels?.[idx] || day}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {timeSlots.map((time) => (
+                  <tr
+                    key={time}
+                    className="bg-white"
+                    ref={(el) => {
+                      if (el) {
+                        timeSlotRefs.current.set(time, el);
+                      } else {
+                        timeSlotRefs.current.delete(time);
+                      }
+                    }}
+                  >
+                    <td className="border border-gray-200 border-r-2 border-r-gray-300 p-3 font-medium sticky left-0 z-30 bg-gray-50" style={{ width: '80px', minWidth: '80px', maxWidth: '80px' }}>
+                      {time}
+                    </td>
                       {days.map((day) => {
                         const cellEvents = getEventsForCell(day, time);
                         const activeIndex = getActiveIndex(day, time);
                         const hasMultipleEvents = cellEvents.length > 1;
                         const cellId = getCellKey(day, time);
                         const isHighlighted = highlightedSlot?.day === day && highlightedSlot?.timeSlot === time;
-
+                        const columnHighlightType = columnHighlights?.[day]?.[time];
+                        const shouldDimColumn = hasColumnHighlighting && !columnHighlightType;
                         return (
-                          <DroppableTimeSlot
-                            key={cellId}
-                            id={cellId}
-                            day={day}
-                            timeSlot={time}
-                            cellBg="white"
-                            cellHoverBg="#eff6ff"
-                            borderColor="#e5e7eb"
-                            cellPadding={defaultDefenceCardTheme.spacing.cell.padding}
-                            className={isHighlighted ? 'bg-blue-50' : ''}
-                            onAddEvent={handleAddDefence}
-                          >
+                              <DroppableTimeSlot
+                                key={cellId}
+                                id={cellId}
+                                day={day}
+                                timeSlot={time}
+                                cellBg="white"
+                                cellHoverBg="#eff6ff"
+                                borderColor="#e5e7eb"
+                                cellPadding={defaultDefenceCardTheme.spacing.cell.padding}
+                                className={clsx(
+                                  isHighlighted && !columnHighlightType && 'bg-blue-50 outline outline-2 outline-blue-900 outline-offset-[-10px]',
+                                  columnHighlightType === 'primary' && 'outline outline-2 outline-blue-900 outline-offset-[-10px] shadow-lg',
+                                  columnHighlightType === 'match' && 'outline outline-[1.5px] outline-emerald-600 outline-offset-[-12px] shadow-md',
+                                  shouldDimColumn && 'opacity-40'
+                                )}
+                                columnWidth={SCHEDULE_COLUMN_WIDTH}
+                                onAddEvent={handleAddDefence}
+                              >
                             {cellEvents.length > 0 && cardViewMode === 'individual' && (
                               <div className="relative min-h-[120px]">
                                 <div className="relative">
@@ -1598,6 +2248,7 @@ export function RosterDashboard({
                                     const isActive = idx === activeIndex;
                                     const stackOffset = hasMultipleEvents ? Math.min(idx, 3) * 4 : 0;
                                     const zIndex = isActive ? 20 : 10 - idx;
+                                    const conflictMeta = getEventConflictMeta(event.id);
 
                                     return (
                                       <DraggableDefenceCard
@@ -1608,14 +2259,19 @@ export function RosterDashboard({
                                         stackOffset={stackOffset}
                                         zIndex={zIndex}
                                         colorScheme={colorScheme}
+                                        conflictCount={conflictMeta.count}
+                                        conflictSeverity={conflictMeta.severity}
+                                        hasDoubleBooking={conflictMeta.hasDoubleBooking}
+                                        doubleBookingCount={conflictMeta.doubleBookingCount}
                                         cardStyle={{
                                           width: '100%',
                                           minHeight: '64px',
-                                          padding: '10px',
+                                          padding: '12px 10px 0px 10px',
                                           fontSize: 'text-xs',
                                           showFullDetails: false,
                                         }}
                                         theme={defaultDefenceCardTheme}
+                                        highlighted={highlightedEventId === event.id}
                                         onClick={(e) => {
                                           const multiSelect = e.ctrlKey || e.metaKey;
                                           if (!isActive && !multiSelect) {
@@ -1627,6 +2283,7 @@ export function RosterDashboard({
                                             handleEventClick(event.id, multiSelect);
                                           }
                                         }}
+                                        onDoubleClick={() => handleEventDoubleClick(event.id)}
                                         onLockToggle={() => handleLockToggle(event.id)}
                                       />
                                     );
@@ -1676,31 +2333,40 @@ export function RosterDashboard({
                             {/* Compact view - individual compact cards stacked vertically */}
                             {cellEvents.length > 0 && cardViewMode === 'compact' && (
                               <div className="flex flex-col" style={{ gap: defaultDefenceCardTheme.spacing.cell.cardSpacing }}>
-                                {cellEvents.map((event) => (
-                                  <DraggableDefenceCard
-                                    key={event.id}
-                                    event={event}
-                                    isActive={true}
-                                    isSelected={selectedEvent === event.id || selectedEvents.has(event.id)}
-                                    stackOffset={0}
-                                    zIndex={10}
-                                    colorScheme={colorScheme}
-                                    cardStyle={{
-                                      width: '100%',
-                                      minHeight: '42px',
-                                      padding: '6px 8px',
-                                      fontSize: 'text-xs',
-                                      showFullDetails: false,
-                                    }}
-                                    theme={defaultDefenceCardTheme}
-                                    onClick={(e) => {
-                                      const multiSelect = e.ctrlKey || e.metaKey;
-                                      handleEventClick(event.id, multiSelect);
-                                    }}
-                                    onLockToggle={() => handleLockToggle(event.id)}
-                                    compact={true}
-                                  />
-                                ))}
+                                {cellEvents.map((event) => {
+                                  const conflictMeta = getEventConflictMeta(event.id);
+                                  return (
+                                    <DraggableDefenceCard
+                                      key={event.id}
+                                      event={event}
+                                      isActive={true}
+                                      isSelected={selectedEvent === event.id || selectedEvents.has(event.id)}
+                                      stackOffset={0}
+                                      zIndex={10}
+                                      colorScheme={colorScheme}
+                                      conflictCount={conflictMeta.count}
+                                      conflictSeverity={conflictMeta.severity}
+                                      hasDoubleBooking={conflictMeta.hasDoubleBooking}
+                                      doubleBookingCount={conflictMeta.doubleBookingCount}
+                                      cardStyle={{
+                                        width: '100%',
+                                        minHeight: '42px',
+                                        padding: '12px 10px 10px 12px',
+                                        fontSize: 'text-xs',
+                                        showFullDetails: false,
+                                      }}
+                                      theme={defaultDefenceCardTheme}
+                                      highlighted={highlightedEventId === event.id}
+                                      onClick={(e) => {
+                                        const multiSelect = e.ctrlKey || e.metaKey;
+                                        handleEventClick(event.id, multiSelect);
+                                      }}
+                                      onDoubleClick={() => handleEventDoubleClick(event.id)}
+                                      onLockToggle={() => handleLockToggle(event.id)}
+                                      compact={true}
+                                    />
+                                  );
+                                })}
                               </div>
                             )}
                           </DroppableTimeSlot>
@@ -1711,7 +2377,6 @@ export function RosterDashboard({
                 </tbody>
               </table>
             </div>
-          </div>
         </div>
       </>
     );
@@ -1771,6 +2436,8 @@ export function RosterDashboard({
                 cardViewMode={cardViewMode}
                 onCardViewModeChange={setCardViewMode}
                 onToggleFilterSidebar={() => setFilterPanelCollapsed(!filterPanelCollapsed)}
+                onShowUnscheduled={handleShowUnscheduled}
+                unscheduledCount={sidebarEvents.length}
                 onAddDefence={handleAddDefence}
                 onGenerateSchedule={() => logger.debug('Generate schedule')}
                 onReoptimize={() => logger.debug('Re-optimize')}
@@ -1778,14 +2445,23 @@ export function RosterDashboard({
                 onSolverSettings={() => logger.debug('Solver settings')}
                 onImportData={() => logger.debug('Import data')}
                 onExportResults={() => logger.debug('Export results')}
-                onSaveSnapshot={() => logger.debug('Save snapshot')}
-                onLoadSnapshot={() => logger.debug('Load snapshot')}
-                onShowConflicts={() => logger.debug('Show conflicts')}
+                onSaveSnapshot={() => {
+                  persistNow();
+                  showToast.success('Session saved');
+                }}
+                onLoadSnapshot={() => {
+                  if (confirm('Clear current session and start fresh?')) {
+                    clearPersistedState();
+                    window.location.reload();
+                  }
+                }}
+                onShowConflicts={() => setShowConflictsPanel(true)}
                 onValidateSchedule={() => logger.debug('Validate schedule')}
                 onViewStatistics={() => logger.debug('View statistics')}
                 onExplainInfeasibility={() => logger.debug('Explain infeasibility')}
                 onDeleteSelection={handleDeleteSelection}
                 onDeleteAll={handleDeleteAll}
+                onUnscheduleSelection={handleUnscheduleSelection}
                 selectedCount={selectedEvents.size}
                 canUndo={canUndo}
                 canRedo={canRedo}
@@ -1808,6 +2484,8 @@ export function RosterDashboard({
                   cardViewMode={cardViewMode}
                   onCardViewModeChange={setCardViewMode}
                   onToggleFilterSidebar={() => setFilterPanelCollapsed(!filterPanelCollapsed)}
+                  onShowUnscheduled={handleShowUnscheduled}
+                  unscheduledCount={sidebarEvents.length}
                   onAddDefence={handleAddDefence}
                   onGenerateSchedule={() => logger.debug('Generate schedule')}
                   onReoptimize={() => logger.debug('Re-optimize')}
@@ -1815,14 +2493,23 @@ export function RosterDashboard({
                   onSolverSettings={() => logger.debug('Solver settings')}
                   onImportData={() => logger.debug('Import data')}
                   onExportResults={() => logger.debug('Export results')}
-                  onSaveSnapshot={() => logger.debug('Save snapshot')}
-                  onLoadSnapshot={() => logger.debug('Load snapshot')}
-                  onShowConflicts={() => logger.debug('Show conflicts')}
+                  onSaveSnapshot={() => {
+                    persistNow();
+                    showToast.success('Session saved');
+                  }}
+                  onLoadSnapshot={() => {
+                    if (confirm('Clear current session and start fresh?')) {
+                      clearPersistedState();
+                      window.location.reload();
+                    }
+                  }}
+                  onShowConflicts={() => setShowConflictsPanel(true)}
                   onValidateSchedule={() => logger.debug('Validate schedule')}
                   onViewStatistics={() => logger.debug('View statistics')}
                   onExplainInfeasibility={() => logger.debug('Explain infeasibility')}
                   onDeleteSelection={handleDeleteSelection}
                   onDeleteAll={handleDeleteAll}
+                  onUnscheduleSelection={handleUnscheduleSelection}
                   selectedCount={selectedEvents.size}
                   canUndo={canUndo}
                   canRedo={canRedo}
@@ -1846,9 +2533,9 @@ export function RosterDashboard({
         return (
           <div className="flex-1 p-6 overflow-auto">
             <h2 className="text-xl font-semibold text-gray-900 mb-4">Explanation & Conflicts</h2>
-            {currentState && currentState.conflicts.length > 0 ? (
+            {conflictSource.length > 0 ? (
               <div className="space-y-4">
-                {currentState.conflicts.map((conflict, idx) => (
+                {conflictSource.map((conflict, idx) => (
                   <div key={idx} className="p-4 bg-red-50 border border-red-200 rounded-lg">
                     <div className="flex items-start gap-3">
                       <svg className="w-5 h-5 text-red-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1856,7 +2543,7 @@ export function RosterDashboard({
                       </svg>
                       <div>
                         <h3 className="font-semibold text-red-900">{conflict.type}</h3>
-                        <p className="text-sm text-red-800 mt-1">{conflict.description}</p>
+                        <p className="text-sm text-red-800 mt-1">{conflict.message || conflict.type}</p>
                         <p className="text-xs text-red-600 mt-2">
                           Affects: {conflict.affectedDefenceIds.join(', ')}
                         </p>
@@ -1910,6 +2597,8 @@ export function RosterDashboard({
             timeHorizon={schedulingContext.timeHorizon}
             onTimeHorizonChange={handleTimeHorizonChange}
             breadcrumbs={breadcrumbs}
+            colorScheme={colorScheme}
+            onColorChange={handleColorChange}
           />
         )}
 
@@ -1921,6 +2610,7 @@ export function RosterDashboard({
             onClose={() => {
               setDetailPanelOpen(false);
               setDetailEditable(false);
+              setDetailPanelMode('detail');
             }}
             content={detailContent}
             positioning="relative"
@@ -1943,6 +2633,15 @@ export function RosterDashboard({
                 logger.debug('Action:', action, data);
               }
             }}
+            mode={detailPanelMode}
+            unscheduledEvents={sidebarEvents}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            onCardClick={handleUnscheduledCardClick}
+            onAddNew={handleAddNewUnscheduled}
+            colorScheme={colorScheme}
+            highlightedEventId={highlightedEventId}
+            selectedEventId={selectedEvent || undefined}
           />
         )}
       </div>
@@ -1950,44 +2649,67 @@ export function RosterDashboard({
       {/* Bottom panel with tabs */}
       <div className="relative">
         {/* Tab bar */}
-        <div className="flex border-t border-gray-200 bg-white">
-          <button
-            onClick={() => {
-              setBottomPanelTab('availability');
-              setAvailabilityExpanded(!availabilityExpanded);
-              setObjectivesExpanded(false);
-            }}
-            className={`px-4 py-2 text-sm font-medium transition-colors ${
-              bottomPanelTab === 'availability' && availabilityExpanded
-                ? 'bg-blue-50 text-blue-600 border-b-2 border-blue-500'
-                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-            }`}
-          >
-            Availability
-          </button>
-          <button
-            onClick={() => {
-              setBottomPanelTab('objectives');
-              setObjectivesExpanded(!objectivesExpanded);
-              setAvailabilityExpanded(false);
-            }}
-            className={`px-4 py-2 text-sm font-medium transition-colors ${
-              bottomPanelTab === 'objectives' && objectivesExpanded
-                ? 'bg-blue-50 text-blue-600 border-b-2 border-blue-500'
-                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-            }`}
-          >
-            Objectives
-          </button>
+        <div className="flex items-center justify-between border-t border-gray-200 bg-white text-lg font-semibold px-4 py-2">
+          <div className="flex">
+            <button
+              onClick={() => handleBottomPanelTabClick('availability')}
+              className={`px-4 py-2 transition-colors ${
+                bottomPanelTab === 'availability' && availabilityExpanded
+                  ? 'bg-blue-50 text-blue-600 border-b-2 border-blue-500'
+                  : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+              }`}
+            >
+              Availability
+            </button>
+            <button
+              onClick={() => handleBottomPanelTabClick('objectives')}
+              className={`px-4 py-2 transition-colors ${
+                bottomPanelTab === 'objectives' && objectivesExpanded
+                  ? 'bg-blue-50 text-blue-600 border-b-2 border-blue-500'
+                  : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+              }`}
+            >
+              Objectives
+            </button>
+            <button
+              onClick={() => handleBottomPanelTabClick('rooms')}
+              className={`px-4 py-2 transition-colors ${
+                bottomPanelTab === 'rooms'
+                  ? 'bg-blue-50 text-blue-600 border-b-2 border-blue-500'
+                  : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+              }`}
+            >
+              Rooms
+            </button>
+          </div>
+          <div className="flex items-center gap-6 text-sm text-gray-600">
+            <span className="font-semibold text-xl text-gray-800">Total defenses:</span>
+            <div className="flex flex-col gap-2 min-w-[720px]">
+              <div className="flex items-center justify-between text-xl font-semibold text-gray-500">
+                <span>{scheduledEventsCount}/{events.length} scheduled</span>
+              </div>
+              <div className="relative flex h-4 overflow-hidden rounded-full border border-gray-200 bg-gray-100 shadow-inner">
+                <div
+                  className="h-full bg-blue-400 transition-[width] duration-300 ease-out"
+                  style={{ width: `${Math.min(100, (scheduledEventsCount / Math.max(events.length, 1)) * 100)}%` }}
+                />
+                <div
+                  className="h-full bg-gray-300 transition-[width] duration-300 ease-out"
+                  style={{ width: `${Math.max(0, ((events.length - scheduledEventsCount) / Math.max(events.length, 1)) * 100)}%` }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Availability Panel - keep mounted for instant switching */}
         <div style={{ display: bottomPanelTab === 'availability' ? 'block' : 'none' }}>
-          <AvailabilityPanel
-            availabilities={availabilities}
-            days={days}
-            dayLabels={dayLabels}
-            timeSlots={timeSlots}
+         <AvailabilityPanel
+           availabilities={visibleAvailabilities}
+           days={days}
+           dayLabels={dayLabels}
+           timeSlots={timeSlots}
+            columnWidth={SCHEDULE_COLUMN_WIDTH}
             editable={true}
             onPersonClick={handleParticipantClick}
             onSlotClick={handleAvailabilitySlotClick}
@@ -2000,14 +2722,27 @@ export function RosterDashboard({
             highlightedSlot={highlightedSlot || undefined}
             rosters={availabilityRosters}
             activeRosterId={activeRosterId}
+            slotConflicts={personSlotConflictsMap}
+            scheduledBookings={scheduledBookings}
+            workloadStats={participantWorkload}
+            columnHighlights={columnHighlights}
+            roomAvailabilityRooms={roomAvailabilityRooms}
+            roomDrawerSlot={highlightedSlot}
+            sharedHeight={sharedPanelHeight}
+            onHeightChange={handleSharedHeightChange}
           />
         </div>
 
         {/* Objectives Panel */}
         {bottomPanelTab === 'objectives' && (
           <ObjectivesPanel
+
             globalObjectives={globalObjectives}
             localObjectives={localObjectives}
+            scheduleStats={{
+              totalEvents: events.length,
+              scheduledEvents: scheduledEventsCount,
+            }}
             onGlobalObjectiveToggle={(id, enabled) => {
               setGlobalObjectives(prev =>
                 prev.map(obj => obj.id === id ? { ...obj, enabled } : obj)
@@ -2027,9 +2762,790 @@ export function RosterDashboard({
             isExpanded={objectivesExpanded}
             onToggleExpanded={() => setObjectivesExpanded(!objectivesExpanded)}
             positioning="relative"
+            sharedHeight={sharedPanelHeight}
+            onHeightChange={handleSharedHeightChange}
+            graphMinHeight={760}
+          />
+        )}
+
+        {bottomPanelTab === 'rooms' && (
+          <RoomAvailabilityPanel
+            rooms={roomAvailabilityRooms}
+            days={days}
+            timeSlots={timeSlots}
+            isExpanded={roomsExpanded}
+            sharedHeight={sharedPanelHeight}
+            onHeightChange={handleSharedHeightChange}
+          />
+        )}
+
+
+        {bottomPanelTab === 'conflicts' && (
+          <ConflictsPanelV2
+            isExpanded={conflictsExpanded}
+            onToggleExpanded={() => setConflictsExpanded(prev => !prev)}
+            sharedHeight={sharedPanelHeight}
+            onHeightChange={handleSharedHeightChange}
           />
         )}
       </div>
+
+      {showConflictsPanel && (
+        <div className="fixed inset-0 z-40 flex">
+          <div
+            className="flex-1 bg-black/30"
+            onClick={() => setShowConflictsPanel(false)}
+            aria-label="Close conflicts panel"
+          />
+          <div className="w-full max-w-lg bg-white shadow-2xl h-full overflow-y-auto border-l border-gray-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-gray-500">Conflicts</p>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  {currentState?.conflicts.length || 0} issue{(currentState?.conflicts.length || 0) === 1 ? '' : 's'}
+                </h3>
+              </div>
+              <button
+                className="text-gray-500 hover:text-gray-700"
+                onClick={() => setShowConflictsPanel(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {(currentState?.conflicts.length || 0) === 0 && (
+                <div className="p-4 bg-green-50 text-green-800 rounded-lg border border-green-200">
+                  No conflicts detected.
+                </div>
+              )}
+
+              {currentState?.conflicts.map(conflict => (
+                <div
+                  key={conflict.id}
+                  className="p-4 rounded-lg border border-gray-200 bg-white shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-gray-500">{conflict.type}</p>
+                      <h4 className="font-semibold text-gray-900">{conflict.message}</h4>
+                      <p className="text-sm text-gray-600 mt-1">
+                        Affects: {conflict.affectedDefenceIds.join(', ') || '—'}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {conflict.day && conflict.timeSlot ? `${conflict.day} @ ${conflict.timeSlot}` : ''}
+                        {conflict.room ? ` • Room ${conflict.room}` : ''}
+                      </p>
+                      {conflict.participants && conflict.participants.length > 0 && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          People: {conflict.participants.join(', ')}
+                        </p>
+                      )}
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 text-xs rounded-full ${
+                        conflict.severity === 'error'
+                          ? 'bg-red-100 text-red-700'
+                          : conflict.severity === 'warning'
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-blue-100 text-blue-700'
+                      }`}
+                    >
+                      {conflict.severity}
+                    </span>
+                  </div>
+
+                  {conflict.suggestions && conflict.suggestions.length > 0 && (
+                    <div className="mt-3 border-t border-gray-100 pt-3 space-y-2">
+                      <p className="text-xs uppercase tracking-wide text-gray-500">Suggestions</p>
+                      {conflict.suggestions.map(suggestion => (
+                        <button
+                          key={suggestion.id}
+                          className="w-full text-left px-3 py-2 rounded-md border border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors text-sm text-gray-800"
+                          onClick={() => handleApplySuggestion(suggestion)}
+                        >
+                          <span className="font-medium">{suggestion.label}</span>
+                          {suggestion.description && (
+                            <span className="block text-xs text-gray-600 mt-0.5">{suggestion.description}</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+type ConflictsConstraintStatus = 'ok' | 'neutral' | 'conflict';
+type ConflictsConstraintType =
+  | 'room'
+  | 'supervisor'
+  | 'coSupervisor'
+  | 'assessors'
+  | 'mentor'
+  | 'preferredDay';
+
+interface ConflictsConstraintCell {
+  type: ConflictsConstraintType;
+  label: string;
+  status: ConflictsConstraintStatus;
+  reason?: string;
+  conflictsWith?: string[];
+}
+
+interface ConflictsRepairAction {
+  id: string;
+  label: string;
+  description: string;
+  type: 'move' | 'swap' | 'capacity';
+  impact: 'low' | 'medium' | 'high';
+  preview?: string;
+}
+
+interface ConflictsDefenseRow {
+  id: string;
+  student: string;
+  targetSlot: string;
+  constraintSummary: string;
+  constraints: ConflictsConstraintCell[];
+  actions: ConflictsRepairAction[];
+}
+
+const conflictColumns: { type: ConflictsConstraintType; title: string }[] = [
+  { type: 'room', title: 'Room' },
+  { type: 'supervisor', title: 'Supervisor' },
+  { type: 'coSupervisor', title: 'Co-supervisor' },
+  { type: 'assessors', title: 'Assessors' },
+  { type: 'mentor', title: 'Mentor' },
+  { type: 'preferredDay', title: 'Day' },
+];
+
+const conflictStatusStyles: Record<ConflictsConstraintStatus, string> = {
+  ok: 'bg-blue-500 border-blue-600',
+  neutral: 'bg-gray-200 border-gray-300',
+  conflict: 'bg-rose-500 border-rose-600 animate-pulse',
+};
+
+// Legacy ConflictsPanel - replaced by ConflictsPanelV2
+// @ts-ignore - unused legacy code kept for reference
+function ConflictsPanel_LEGACY({
+  isExpanded,
+  onToggleExpanded,
+  sharedHeight,
+  onHeightChange,
+}: {
+  isExpanded: boolean;
+  onToggleExpanded: () => void;
+  sharedHeight?: number;
+  onHeightChange?: (height: number) => void;
+}) {
+  const rows = useMockConflictRows();
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  const [selectedColumn, setSelectedColumn] = useState<ConflictsConstraintType | null>(null);
+  const [pendingRepairs, setPendingRepairs] = useState<ConflictsRepairAction[]>([]);
+  const [appliedRepairs, setAppliedRepairs] = useState<Set<string>>(new Set());
+  const [panelHeight, setPanelHeight] = useState(sharedHeight ?? 520);
+  const [isDragging, setIsDragging] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const dragStartY = useRef(0);
+  const dragStartHeight = useRef(0);
+  const currentDragHeight = useRef(0);
+  const expandedRow = useMemo(
+    () => rows.find(row => row.id === expandedRowId) || null,
+    [rows, expandedRowId]
+  );
+
+  const highlightedRows = useMemo(() => {
+    if (!selectedColumn) return new Set<string>();
+    return new Set(
+      rows
+        .filter(row =>
+          row.constraints.some(c => c.type === selectedColumn && c.status === 'conflict')
+        )
+        .map(r => r.id)
+    );
+  }, [rows, selectedColumn]);
+
+  useEffect(() => {
+    if (typeof sharedHeight === 'number' && sharedHeight > 0 && sharedHeight !== panelHeight) {
+      setPanelHeight(sharedHeight);
+    }
+  }, [sharedHeight, panelHeight]);
+
+  const handleAddRepair = (action: ConflictsRepairAction) => {
+    if (pendingRepairs.some(r => r.id === action.id)) return;
+    setPendingRepairs(prev => [...prev, action]);
+  };
+
+  const handleApplyRepair = (actionId: string) => {
+    setAppliedRepairs(prev => {
+      const next = new Set(prev);
+      next.add(actionId);
+      return next;
+    });
+    setPendingRepairs(prev => prev.filter(r => r.id !== actionId));
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const deltaY = dragStartY.current - e.clientY;
+      const newHeight = Math.max(220, Math.min(window.innerHeight * 0.8, dragStartHeight.current + deltaY));
+      currentDragHeight.current = newHeight;
+      if (panelRef.current) {
+        panelRef.current.style.height = `${newHeight}px`;
+      }
+      onHeightChange?.(newHeight);
+    };
+
+    const handleMouseUp = () => {
+      if (currentDragHeight.current > 0) {
+        setPanelHeight(currentDragHeight.current);
+        onHeightChange?.(currentDragHeight.current);
+      }
+      setIsDragging(false);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove, { passive: true });
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, onHeightChange]);
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+    dragStartY.current = e.clientY;
+    dragStartHeight.current = panelHeight;
+    currentDragHeight.current = panelHeight;
+  };
+
+  return (
+    <div
+      ref={panelRef}
+      className={`relative w-full bg-white border-t border-gray-200 shadow-inner ${isDragging ? '' : 'transition-all duration-300 ease-in-out'}`}
+      style={{ height: isExpanded ? `${panelHeight}px` : '0px' }}
+    >
+      {isExpanded && (
+        <div
+          className="absolute top-0 left-0 right-0 h-2 cursor-ns-resize hover:bg-blue-100 active:bg-blue-200 flex items-center justify-center group"
+          onMouseDown={handleDragStart}
+        >
+          <GripHorizontal className="h-3 w-3 text-gray-400 group-hover:text-blue-600" />
+        </div>
+      )}
+
+      <div
+        className="h-full pt-3 flex flex-col"
+        style={{
+          opacity: isExpanded ? 1 : 0,
+          visibility: isExpanded ? 'visible' : 'hidden',
+          pointerEvents: isExpanded ? 'auto' : 'none',
+        }}
+      >
+        <div className="flex items-center justify-between px-4 pb-2 border-b border-gray-100">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-gray-500">Conflicts</p>
+            <h3 className="text-base font-semibold text-gray-900">
+              {rows.length} unscheduled defenses
+            </h3>
+          </div>
+          <button
+            onClick={onToggleExpanded}
+            className="text-xs font-medium text-blue-600 hover:text-blue-800"
+          >
+            {isExpanded ? 'Collapse' : 'Expand'}
+          </button>
+        </div>
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex-1 overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead className="sticky top-0 bg-gray-50 shadow-sm z-10">
+              <tr>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  Defense
+                </th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  Blocking reason
+                </th>
+                {conflictColumns.map(col => (
+                  <th
+                    key={col.type}
+                    className={clsx(
+                      'px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide cursor-pointer select-none',
+                      selectedColumn === col.type && 'text-blue-600'
+                    )}
+                    onClick={() =>
+                      setSelectedColumn(prev => (prev === col.type ? null : col.type))
+                    }
+                  >
+                    {col.title}
+                    {selectedColumn === col.type && (
+                      <span className="ml-1 inline-flex items-center rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                        Filtered
+                      </span>
+                    )}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => {
+                const isSelected = expandedRow?.id === row.id;
+                const isHighlighted = highlightedRows.has(row.id);
+                return (
+                  <Fragment key={row.id}>
+                    <tr
+                      className={clsx(
+                        'border-b border-gray-100 hover:bg-blue-50 transition-colors',
+                        isSelected && 'bg-blue-50',
+                        isHighlighted && 'ring-1 ring-blue-200'
+                      )}
+                      onClick={() => {
+                        setExpandedRowId(prev => (prev === row.id ? null : row.id));
+                      }}
+                    >
+                      <td className="px-4 py-3">
+                        <div className="font-semibold text-gray-900">{row.student}</div>
+                        <div className="text-[11px] uppercase text-rose-500 tracking-wide font-semibold">
+                          Unscheduled
+                        </div>
+                        <div className="text-xs text-gray-500">{row.targetSlot}</div>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-600">{row.constraintSummary}</td>
+                      {conflictColumns.map(col => {
+                        const cell = row.constraints.find(c => c.type === col.type)!;
+                        return (
+                          <td key={col.type} className="px-3 py-2">
+                            <button
+                              className={clsx(
+                                'w-6 h-6 rounded-full border transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-400',
+                                conflictStatusStyles[cell.status]
+                              )}
+                              title={cell.reason || 'No issues'}
+                              onClick={e => {
+                                e.stopPropagation();
+                                setExpandedRowId(prev => (prev === row.id ? null : row.id));
+                                setSelectedColumn(cell.type);
+                              }}
+                            />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    {isSelected && expandedRow && (
+                      <tr className="bg-white border-b border-gray-100">
+                        <td colSpan={conflictColumns.length + 2} className="px-6 py-4">
+                          <ConflictsRowDrawer
+                            row={expandedRow}
+                            onAddRepair={handleAddRepair}
+                            selectedColumn={selectedColumn}
+                            onCollapse={() => setExpandedRowId(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="w-80 border-l border-gray-200 bg-gray-50 p-4 space-y-4">
+          <ConflictsColumnTray column={selectedColumn} rows={rows} onAddRepair={handleAddRepair} />
+        </div>
+      </div>
+
+        <ConflictsRepairQueueBar
+          actions={pendingRepairs}
+          appliedActions={appliedRepairs}
+          onApply={handleApplyRepair}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ConflictsRowDrawer({
+  row,
+  onAddRepair,
+  selectedColumn,
+  onCollapse,
+}: {
+  row: ConflictsDefenseRow;
+  onAddRepair: (action: ConflictsRepairAction) => void;
+  selectedColumn: ConflictsConstraintType | null;
+  onCollapse: () => void;
+}) {
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="lg:col-span-2 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-gray-500">Repair plan</p>
+            <h4 className="text-base font-semibold text-gray-900">{row.student}</h4>
+          </div>
+          <button
+            onClick={onCollapse}
+            className="text-xs font-medium text-gray-500 hover:text-gray-800"
+          >
+            Collapse
+          </button>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">Move this defense</p>
+          <div className="space-y-2">
+            {row.actions
+              .filter(a => a.type !== 'capacity')
+              .map(action => (
+                <ConflictsActionCard key={action.id} action={action} onAdd={() => onAddRepair(action)} />
+              ))}
+          </div>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">Escalate capacity</p>
+          <div className="space-y-2">
+            {row.actions
+              .filter(a => a.type === 'capacity')
+              .map(action => (
+                <ConflictsActionCard key={action.id} action={action} onAdd={() => onAddRepair(action)} />
+              ))}
+          </div>
+        </div>
+      </div>
+      <div className="space-y-3">
+        <p className="text-xs uppercase tracking-wide text-gray-500">Conflict details</p>
+        <div className="space-y-2">
+          {row.constraints
+            .filter(c => c.status === 'conflict' && (!selectedColumn || c.type === selectedColumn))
+            .map(c => (
+              <div key={c.type} className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm">
+                <p className="font-medium text-rose-800">{c.label}</p>
+                <p className="text-rose-700 text-xs mt-1">{c.reason}</p>
+                {c.conflictsWith && (
+                  <p className="text-xs text-rose-600 mt-1">
+                    Conflicts with {c.conflictsWith.join(', ')}
+                  </p>
+                )}
+              </div>
+            ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConflictsColumnTray({
+  column,
+  rows,
+  onAddRepair,
+}: {
+  column: ConflictsConstraintType | null;
+  rows: ConflictsDefenseRow[];
+  onAddRepair: (action: ConflictsRepairAction) => void;
+}) {
+  if (!column) {
+    return (
+      <div className="text-sm text-gray-500">
+        Select a column to see resource load and suggested bulk fixes.
+      </div>
+    );
+  }
+
+  const columnLabel = conflictColumns.find(c => c.type === column)?.title ?? 'Constraint';
+  const affectedRows = rows.filter(r =>
+    r.constraints.some(c => c.type === column && c.status === 'conflict')
+  );
+  const mockActions = affectedRows.flatMap(r =>
+    r.actions.filter(a => a.type !== 'capacity').slice(0, 1)
+  );
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-xs uppercase tracking-wide text-gray-500">Column filter</p>
+        <h4 className="text-lg font-semibold text-gray-900">{columnLabel}</h4>
+        <p className="text-xs text-gray-500">{affectedRows.length} defenses affected</p>
+      </div>
+      <div>
+        <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">Suggested moves</p>
+        <div className="space-y-2">
+          {mockActions.map(action => (
+            <ConflictsActionCard
+              key={`${column}-${action.id}`}
+              action={action}
+              onAdd={() => onAddRepair(action)}
+            />
+          ))}
+          {mockActions.length === 0 && (
+            <p className="text-xs text-gray-500">No direct moves available. Consider capacity changes.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConflictsActionCard({ action, onAdd }: { action: ConflictsRepairAction; onAdd: () => void }) {
+  const impactColors: Record<ConflictsRepairAction['impact'], string> = {
+    low: 'text-emerald-700 bg-emerald-50 border border-emerald-200',
+    medium: 'text-amber-700 bg-amber-50 border border-amber-200',
+    high: 'text-rose-700 bg-rose-50 border border-rose-200',
+  };
+
+  return (
+    <div className="p-3 rounded-lg border border-gray-200 bg-white shadow-sm space-y-1">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="font-medium text-gray-900">{action.label}</p>
+          <p className="text-xs text-gray-500">{action.description}</p>
+        </div>
+        <span
+          className={clsx('text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase', impactColors[action.impact])}
+        >
+          {action.impact}
+        </span>
+      </div>
+      {action.preview && (
+        <p className="text-[11px] text-gray-500">Preview: {action.preview}</p>
+      )}
+      <div className="flex gap-2">
+        <button className="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors">
+          Preview
+        </button>
+        <button
+          onClick={onAdd}
+          className="text-xs font-medium text-gray-700 hover:text-gray-900"
+        >
+          Add to queue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConflictsRepairQueueBar({
+  actions,
+  appliedActions,
+  onApply,
+}: {
+  actions: ConflictsRepairAction[];
+  appliedActions: Set<string>;
+  onApply: (actionId: string) => void;
+}) {
+  return (
+    <div className="border-t border-gray-200 bg-gray-50 px-4 py-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-wide text-gray-500">
+            Pending repairs ({actions.length})
+          </p>
+          <div className="flex flex-wrap gap-2 mt-2">
+            {actions.map(action => (
+              <div
+                key={action.id}
+                className="px-3 py-1 rounded-full bg-white border border-gray-200 text-xs text-gray-700 flex items-center gap-2"
+              >
+                {action.label}
+                <button
+                  className="text-blue-600 hover:text-blue-800"
+                  onClick={() => onApply(action.id)}
+                >
+                  Apply
+                </button>
+              </div>
+            ))}
+            {actions.length === 0 && (
+              <span className="text-xs text-gray-500">
+                Select a move or capacity change to build a plan.
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="text-xs text-gray-500">Applied actions: {appliedActions.size}</div>
+      </div>
+    </div>
+  );
+}
+
+function useMockConflictRows(): ConflictsDefenseRow[] {
+  return useMemo(
+    () => [
+      {
+        id: 'def-01',
+        student: 'Wu Hanlin',
+        targetSlot: 'Target: Feb 24 · 15:00 · Room 5',
+        constraintSummary: 'Room full + Joosen unavailable',
+        constraints: [
+          {
+            type: 'room',
+            label: 'Room 5',
+            status: 'conflict',
+            reason: 'Room 5 fully booked on Feb 24 afternoon',
+            conflictsWith: ['def-141', 'def-122'],
+          },
+          {
+            type: 'supervisor',
+            label: 'Prof. Wouter Joosen',
+            status: 'conflict',
+            reason: 'Already supervising at 15:00',
+          },
+          { type: 'coSupervisor', label: 'Dr. Eddy Truyen', status: 'ok' },
+          {
+            type: 'assessors',
+            label: 'Panel',
+            status: 'neutral',
+            reason: 'Flexible',
+          },
+          { type: 'mentor', label: 'Mentor TBD', status: 'neutral' },
+          {
+            type: 'preferredDay',
+            label: 'Feb 24',
+            status: 'conflict',
+            reason: 'Student can only defend before 16:00',
+          },
+        ],
+        actions: [
+          {
+            id: 'move-01',
+            label: 'Move to Feb 25 · 10:00 · Room 5',
+            description: 'Swap with defense_141 to free 15:00 slot',
+            type: 'move',
+            impact: 'low',
+            preview: 'Adds 1 defense Feb 25 morning',
+          },
+          {
+            id: 'move-02',
+            label: 'Move to Feb 26 · 11:00 · Room 6',
+            description: 'Next available slot with same panel',
+            type: 'move',
+            impact: 'medium',
+            preview: 'Shifts defense_23 to 26th',
+          },
+          {
+            id: 'capacity-01',
+            label: 'Add Room 21 (Feb 24 afternoon)',
+            description: 'Temporary room unlock',
+            type: 'capacity',
+            impact: 'medium',
+          },
+          {
+            id: 'capacity-02',
+            label: 'Extend Joosen availability to 15:00',
+            description: 'Request extra slot from supervisor',
+            type: 'capacity',
+            impact: 'high',
+          },
+        ],
+      },
+      {
+        id: 'def-02',
+        student: 'Aïcha Sanogo',
+        targetSlot: 'Target: Feb 25 · 13:00 · Room 5',
+        constraintSummary: 'Evaluator limit exceeded',
+        constraints: [
+          { type: 'room', label: 'Room 5', status: 'neutral' },
+          {
+            type: 'supervisor',
+            label: 'Prof. Joosen',
+            status: 'conflict',
+            reason: 'Max 3 defenses/day reached',
+          },
+          {
+            type: 'coSupervisor',
+            label: 'Dr. Anke',
+            status: 'ok',
+          },
+          {
+            type: 'assessors',
+            label: 'Panel B',
+            status: 'conflict',
+            reason: 'Assessor overlap with defense_67',
+          },
+          { type: 'mentor', label: 'Mentor Li', status: 'neutral' },
+          { type: 'preferredDay', label: 'Feb 25', status: 'ok' },
+        ],
+        actions: [
+          {
+            id: 'move-10',
+            label: 'Swap with defense_67 (Feb 26 · 14:00)',
+            description: 'Frees assessor slot',
+            type: 'swap',
+            impact: 'low',
+            preview: 'Maintains panel availability',
+          },
+          {
+            id: 'move-11',
+            label: 'Move to Feb 27 · 09:00 · Room 8',
+            description: 'Next free slot for panel B',
+            type: 'move',
+            impact: 'medium',
+          },
+          {
+            id: 'capacity-10',
+            label: 'Allow 4 defenses/day for Joosen',
+            description: 'Temporary cap increase',
+            type: 'capacity',
+            impact: 'high',
+          },
+        ],
+      },
+      {
+        id: 'def-03',
+        student: 'Fatoumata Bah',
+        targetSlot: 'Target: Feb 24 · 11:00 · Room 3',
+        constraintSummary: 'Mentor unavailable before noon',
+        constraints: [
+          { type: 'room', label: 'Room 3', status: 'ok' },
+          { type: 'supervisor', label: 'Dr. Maria', status: 'ok' },
+          { type: 'coSupervisor', label: 'Dr. Elena', status: 'neutral' },
+          {
+            type: 'assessors',
+            label: 'Panel D',
+            status: 'ok',
+          },
+          {
+            type: 'mentor',
+            label: 'Mentor Kofi',
+            status: 'conflict',
+            reason: 'Not available before 12:00',
+          },
+          {
+            type: 'preferredDay',
+            label: 'Feb 24',
+            status: 'ok',
+          },
+        ],
+        actions: [
+          {
+            id: 'move-20',
+            label: 'Move to Feb 24 · 13:00 · Room 3',
+            description: 'Keeps same day and room',
+            type: 'move',
+            impact: 'low',
+          },
+          {
+            id: 'capacity-20',
+            label: 'Request mentor availability 11:00',
+            description: 'Ask for exception',
+            type: 'capacity',
+            impact: 'medium',
+          },
+        ],
+      },
+    ],
+    []
   );
 }

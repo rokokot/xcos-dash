@@ -25,7 +25,7 @@ export const defaultDefenceCardTheme: DefenceCardTheme = {
     },
     supervisor: {
       fontSize: 'inherit',
-      fontWeight: 'normal',
+      fontWeight: 'bold',
       lineHeight: '1.3',
     },
     coSupervisor: {
@@ -70,11 +70,11 @@ export const defaultDefenceCardTheme: DefenceCardTheme = {
   spacing: {
     card: {
       padding: '10px', // Matches current DraggableDefenceCard
-      internalGap: '4px', // Gap between student/supervisor lines
+      internalGap: '8px', // Gap between student/supervisor lines
     },
     cell: {
-      padding: '16px', // DroppableTimeSlot padding
-      cardSpacing: '10px', // Gap between cards in compact mode (1.5 * 4px = 6px from current gap-1.5)
+      padding: '20px', // DroppableTimeSlot padding
+      cardSpacing: '18px', // Gap between cards in compact mode (1.5 * 4px = 6px from current gap-1.5)
     },
     stacking: {
       offset: 4, // Current stackOffset value for individual mode
@@ -103,7 +103,7 @@ export const defaultDefenceCardTheme: DefenceCardTheme = {
     },
     active: {
       offsetX: '0',
-      offsetY: '10px',
+      offsetY: '0px',
       blur: '15px',
       spread: '-3px',
       color: 'rgba(0, 0, 0, 0.2)', // shadow-lg equivalent
@@ -119,16 +119,16 @@ export const defaultDefenceCardTheme: DefenceCardTheme = {
   states: {
     selected: {
       border: {
-        width: '2px',
-        color: 'white',
+        width: '2.3px',
+        color: '#4a5568',
         style: 'solid',
       },
       shadow: {
         offsetX: '0',
         offsetY: '0',
         blur: '0',
-        spread: '2px',
-        color: 'rgba(59, 130, 246, 0.5)', // blue-500 with 50% opacity
+        spread: '0',
+        color: 'rgba(74, 85, 104, 0.6)',
       },
     },
     locked: {
@@ -140,12 +140,12 @@ export const defaultDefenceCardTheme: DefenceCardTheme = {
     },
     conflicts: {
       doubleBooking: {
-        ringWidth: '2px',
-        ringColor: 'rgb(239, 68, 68)', // red-500
+        ringWidth: '4px',
+        ringColor: 'rgba(241, 139, 139, 1)', // red-500
       },
       availability: {
-        ringWidth: '1px',
-        ringColor: 'rgb(251, 146, 60)', // orange-400
+        ringWidth: '4px',
+        ringColor: 'rgba(241, 139, 139, 1)', // orange-400
       },
     },
   },

@@ -3,6 +3,9 @@
  */
 import Papa from 'papaparse';
 import { PersonAvailability, AvailabilityStatus, PersonRole, ConflictInfo } from '../components/availability/types';
+import { splitParticipantNames } from '../utils/participantNames';
+
+const normalizeName = (value?: string | null) => (value || '').trim().toLowerCase();
 
 interface AvailabilityCSVRow {
   person_id: string;
@@ -112,13 +115,19 @@ export function detectEventConflicts(
   const availabilitiesWithConflicts = availabilities.map(person => ({ ...person, conflicts: [] as ConflictInfo[] }));
 
   availabilitiesWithConflicts.forEach((person) => {
-    const personEvents = events.filter(event =>
-      event.student === person.name ||
-      event.supervisor === person.name ||
-      event.coSupervisor === person.name ||
-      (event.assessors && event.assessors.includes(person.name)) ||
-      (event.mentors && event.mentors.includes(person.name))
-    );
+    const normalizedPersonName = normalizeName(person.name);
+    // Only check scheduled events (those with day and time)
+    const personEvents = events.filter(event => {
+      if (!event.day || !event.startTime) return false;
+      const participantNames: string[] = [];
+      splitParticipantNames(event.student).forEach(name => participantNames.push(name));
+      splitParticipantNames(event.supervisor).forEach(name => participantNames.push(name));
+      splitParticipantNames(event.coSupervisor).forEach(name => participantNames.push(name));
+      if (event.assessors) participantNames.push(...event.assessors);
+      if (event.mentors) participantNames.push(...event.mentors);
+
+      return participantNames.some(name => normalizeName(name) === normalizedPersonName);
+    });
 
     // Group events by day and time to detect overlaps
     const eventsByDayTime = new Map<string, string[]>();
@@ -138,6 +147,24 @@ export function detectEventConflicts(
           day,
           timeSlot,
           conflictingEvents: eventIds,
+        });
+      }
+    });
+
+    // Availability violations: scheduled when unavailable/not set/online-only mismatch
+    personEvents.forEach(event => {
+      const day = event.day;
+      const slot = event.startTime;
+      const statusObj = person.availability?.[day]?.[slot];
+      const status = typeof statusObj === 'object' ? statusObj.status : statusObj;
+
+      // Treat missing as unavailable; booked is fine (already counted as occupied)
+      const unavailable = !status || status === 'unavailable';
+      if (unavailable) {
+        person.conflicts!.push({
+          day,
+          timeSlot: slot,
+          conflictingEvents: [event.id],
         });
       }
     });

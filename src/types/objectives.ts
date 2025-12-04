@@ -3,7 +3,10 @@ export type GlobalObjectiveType =
   | 'balance-workload'
   | 'minimize-gaps'
   | 'preference-satisfaction'
-  | 'temporal-clustering';
+  | 'temporal-clustering'
+  | 'adjacency-alignment'
+  | 'evaluator-distance'
+  | 'room-preference';
 
 export type LocalObjectiveType =
   | 'temporal-proximity'
@@ -37,4 +40,9 @@ export interface ObjectiveScores {
   global: Record<string, number>;
   local: Record<string, number>;
   total: number;
+}
+
+export interface ScheduleStats {
+  totalEvents: number;
+  scheduledEvents: number;
 }

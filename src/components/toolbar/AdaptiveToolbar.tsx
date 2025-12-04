@@ -25,6 +25,7 @@ import {
   Copy,
   Layers,
   X,
+  CalendarX,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 
@@ -34,6 +35,8 @@ export interface AdaptiveToolbarProps {
   position?: 'top' | 'right';
   onPositionChange?: (position: 'top' | 'right') => void;
   onToggleFilterSidebar?: () => void;
+  onShowUnscheduled?: () => void;
+  unscheduledCount?: number;
   onAddDefence?: () => void;
   onGenerateSchedule?: () => void;
   onReoptimize?: () => void;
@@ -49,6 +52,7 @@ export interface AdaptiveToolbarProps {
   onExplainInfeasibility?: () => void;
   onDeleteSelection?: () => void;
   onDeleteAll?: () => void;
+  onUnscheduleSelection?: () => void;
   selectedCount?: number;
   canUndo?: boolean;
   canRedo?: boolean;
@@ -78,6 +82,8 @@ export function AdaptiveToolbar({
   cardViewMode = 'individual',
   onCardViewModeChange,
   onToggleFilterSidebar,
+  onShowUnscheduled,
+  unscheduledCount = 0,
   onAddDefence,
   onGenerateSchedule,
   onReoptimize,
@@ -93,6 +99,7 @@ export function AdaptiveToolbar({
   onExplainInfeasibility,
   onDeleteSelection,
   onDeleteAll,
+  onUnscheduleSelection,
   selectedCount = 0,
   rosters = [],
   activeRosterId,
@@ -138,7 +145,10 @@ export function AdaptiveToolbar({
 
   if (position === 'right') {
     return (
-      <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-3 overflow-y-auto">
+      <div
+        className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-3 overflow-y-auto"
+        data-prevent-clear="true"
+      >
         {/* Position Toggle */}
         <button
           onClick={togglePosition}
@@ -208,9 +218,22 @@ export function AdaptiveToolbar({
 
         {/* Core Actions */}
         <button
+          onClick={onShowUnscheduled}
+          className="relative p-2 text-gray-700 hover:bg-gray-100 rounded transition-colors"
+          title="View all events"
+        >
+          <Layers className="w-5 h-5" />
+          {unscheduledCount > 0 && (
+            <span className="absolute -top-1 -right-1 px-1.5 py-0.5 text-xs font-medium bg-blue-500 text-white rounded-full">
+              {unscheduledCount}
+            </span>
+          )}
+        </button>
+
+        <button
           onClick={onAddDefence}
           className="p-2 text-gray-700 hover:bg-gray-100 rounded transition-colors"
-          title="Add defence"
+          title="Add defense"
         >
           <Plus className="w-5 h-5" />
         </button>
@@ -314,7 +337,10 @@ export function AdaptiveToolbar({
 
   // Horizontal (top) layout
   return (
-    <div className="bg-white border-b border-gray-200 px-2 sm:px-4 py-1.5 sm:py-2">
+    <div
+      className="bg-white border-b border-gray-200 px-2 sm:px-4 py-1.5 sm:py-2"
+      data-prevent-clear="true"
+    >
       <div className="flex items-center gap-2 sm:gap-4">
         {/* Position Toggle */}
         <button
@@ -387,9 +413,23 @@ export function AdaptiveToolbar({
         {/* Core Actions */}
         <div className="flex items-center gap-1.5 pr-4 border-r border-gray-200">
           <button
+            onClick={onShowUnscheduled}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+            title="View all events"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>Events</span>
+            {unscheduledCount > 0 && (
+              <span className="px-1.5 py-0.5 text-xs font-medium bg-blue-100 text-blue-700 rounded">
+                {unscheduledCount}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={onAddDefence}
             className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 transition-colors"
-            title="Add new defence"
+            title="Add new defense"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add</span>
@@ -647,12 +687,26 @@ export function AdaptiveToolbar({
           </button>
         </div>
 
+        {/* Unschedule */}
+        {selectedCount > 0 && onUnscheduleSelection && (
+          <button
+            onClick={onUnscheduleSelection}
+            className="p-1.5 text-orange-600 hover:bg-orange-50 rounded transition-colors relative"
+            title="Unschedule selected defenses"
+          >
+            <CalendarX className="w-3.5 h-3.5" />
+            <span className="absolute -top-1 -right-1 px-1 text-[10px] bg-orange-600 text-white rounded-full min-w-[16px] text-center">
+              {selectedCount}
+            </span>
+          </button>
+        )}
+
         {/* Delete */}
         <div className="relative" ref={deleteRef}>
           <button
             onClick={() => setDeleteMenuOpen(!deleteMenuOpen)}
             className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors relative"
-            title="Delete defences"
+            title="Delete defenses"
           >
             <Trash2 className="w-3.5 h-3.5" />
             {selectedCount > 0 && (
@@ -683,7 +737,7 @@ export function AdaptiveToolbar({
                   }}
                   className="w-full text-left px-3 py-1.5 text-xs text-gray-900 hover:bg-gray-100"
                 >
-                  Delete All Defences
+                  Delete All Defenses
                 </button>
                 {rosters.length > 1 && activeRosterId && (
                   <button

@@ -16,11 +16,30 @@ export interface DefenceEvent {
   conflicts?: string[];
 }
 
+export type ConflictSeverity = 'error' | 'warning' | 'info';
+
+export interface ConflictSuggestion {
+  id: string;
+  label: string;
+  description?: string;
+  // High-level action identifier the frontend can route to a handler (e.g., "move-to-slot", "swap-room")
+  action: string;
+  // Optional payload needed for the action (day/time/room/etc.)
+  payload?: Record<string, any>;
+}
+
 export interface Conflict {
-  type: 'double-booking' | 'availability-violation' | 'room-capacity' | 'other';
+  id: string;
+  type: 'double-booking' | 'availability-violation' | 'room-capacity' | 'locked-violation' | 'illegal-timeslot' | 'unscheduled' | 'other';
+  message: string;
   affectedDefenceIds: string[];
-  description: string;
-  severity: 'error' | 'warning';
+  participants?: string[];
+  room?: string;
+  day?: string;
+  timeSlot?: string;
+  severity: ConflictSeverity;
+  constraintId?: string;
+  suggestions?: ConflictSuggestion[];
 }
 
 export interface SolverRunInfo {
@@ -52,7 +71,8 @@ export type ScheduleActionType =
   | 'lock-defence'
   | 'unlock-defence'
   | 'solver-run'
-  | 'manual-edit';
+  | 'manual-edit'
+  | 'validation-update';
 
 export interface ScheduleAction {
   type: ScheduleActionType;

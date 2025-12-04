@@ -13,6 +13,7 @@ export interface DroppableTimeSlotProps {
   className?: string;
   priority?: 'normal' | 'prioritized' | 'deprioritized' | 'unavailable';
   cellPadding?: string; // Theme-controlled cell padding
+  columnWidth?: number;
 }
 
 const priorityBackgrounds = {
@@ -41,6 +42,7 @@ function DroppableTimeSlotComponent({
   className = '',
   priority = 'normal',
   cellPadding = '8px',
+  columnWidth,
 }: DroppableTimeSlotProps) {
   const ref = useRef<HTMLTableCellElement>(null);
   const [state, setState] = useState<State>(idle);
@@ -85,6 +87,12 @@ function DroppableTimeSlotComponent({
         borderColor,
         backgroundColor: finalBg,
         padding: cellPadding,
+        position: 'relative',
+        width: columnWidth ? `${columnWidth}px` : undefined,
+        minWidth: columnWidth ? `${columnWidth}px` : undefined,
+        maxWidth: columnWidth ? `${columnWidth}px` : undefined,
+        wordBreak: 'break-word',
+        overflowWrap: 'anywhere',
       }}
       onClick={() => {
         if (isEmpty) {
@@ -106,6 +114,7 @@ export const DroppableTimeSlot = memo(DroppableTimeSlotComponent, (prevProps, ne
     prevProps.children === nextProps.children &&
     prevProps.className === nextProps.className &&
     prevProps.cellPadding === nextProps.cellPadding &&
+    prevProps.columnWidth === nextProps.columnWidth &&
     prevProps.onAddEvent === nextProps.onAddEvent
   );
 });

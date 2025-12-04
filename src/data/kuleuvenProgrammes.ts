@@ -203,15 +203,6 @@ export const programmes: Programme[] = [
     departmentId: 'civil',
   },
   {
-    id: 'ma-eng-cs',
-    name: 'Master of Engineering: Computer Science (Leuven)',
-    nameNl: 'Master of Engineering: Computer Science (Leuven)',
-    type: 'Master',
-    credits: 120,
-    language: 'Engels',
-    departmentId: 'cs',
-  },
-  {
     id: 'ma-eng-monuments',
     name: 'Master of Conservation of Monuments and Sites (Leuven)',
     nameNl: 'Master of Conservation of Monuments and Sites (Leuven)',

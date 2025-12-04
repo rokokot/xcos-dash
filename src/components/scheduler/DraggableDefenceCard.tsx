@@ -1,14 +1,18 @@
 import { memo, useEffect, useRef, useState, useMemo } from 'react';
+import clsx from 'clsx';
 import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
 import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
 import { attachClosestEdge, extractClosestEdge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import type { Edge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/types';
 import { DropIndicator } from '@atlaskit/pragmatic-drag-and-drop-react-drop-indicator/box';
 import { Lock, Check } from 'lucide-react';
+import StatusErrorIcon from '@atlaskit/icon/core/status-error';
+import PersonWarningIcon from '@atlaskit/icon/core/person-warning';
 import { DefenceEvent } from '../../types/schedule';
 import { DefenceCardTheme } from '../../config/cardStyles.types';
 import { defaultDefenceCardTheme } from '../../config/cardStyles.config';
 import { mergeThemes, shadowToCss, applyTypography, getTextColor } from '../../config/cardStyles.utils';
+import { formatParticipantNames } from '../../utils/participantNames';
 
 export interface DraggableDefenceCardProps {
   event: DefenceEvent;
@@ -25,10 +29,16 @@ export interface DraggableDefenceCardProps {
     showFullDetails?: boolean;
   };
   onClick: (e: React.MouseEvent) => void;
+  onDoubleClick?: () => void;
   onCheckboxClick?: (e: React.MouseEvent) => void;
   onLockToggle: () => void;
   compact?: boolean;
   theme?: Partial<DefenceCardTheme>; // Optional theme override
+  highlighted?: boolean;
+  conflictCount?: number;
+  conflictSeverity?: 'error' | 'warning' | 'info';
+  hasDoubleBooking?: boolean;
+  doubleBookingCount?: number;
 }
 
 function DraggableDefenceCardComponent({
@@ -40,14 +50,21 @@ function DraggableDefenceCardComponent({
   colorScheme,
   cardStyle,
   onClick,
+  onDoubleClick,
   onCheckboxClick,
-  onLockToggle,
+  onLockToggle: _onLockToggle,
   compact = false,
   theme,
+  highlighted = false,
+  conflictCount = 0,
+  conflictSeverity,
+  hasDoubleBooking = false,
+  doubleBookingCount = 0,
 }: DraggableDefenceCardProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
+  const coSupervisorDisplay = formatParticipantNames(event.coSupervisor);
 
   // Merge theme with defaults - memoized to prevent recalculation
   const resolvedTheme = useMemo(
@@ -118,16 +135,23 @@ function DraggableDefenceCardComponent({
 
     // Base card style with theme
     const baseColor = event.color || colorScheme[event.programme] || '#aeb6c4ff';
+
+    // Get padding and fontSize from appropriate source
+    const effectivePadding = cardStyle.padding || (compact ? resolvedTheme.modes.compact.padding : resolvedTheme.spacing.card.padding);
+    const effectiveFontSize = cardStyle.fontSize || (compact ? resolvedTheme.modes.compact.fontSize : undefined);
+
     const computedStyle: React.CSSProperties = {
       backgroundColor: baseColor,
       color: getTextColor(resolvedTheme.colors.text.student.color, resolvedTheme.colors.background.opacity),
       top: compact ? '0' : `${actualStackOffset}px`,
       position: compact ? 'relative' : 'absolute',
       width: cardStyle.width || '100%',
+      left: compact ? undefined : 0,
+      right: compact ? undefined : 0,
       minHeight: cardStyle.minHeight || modeConfig.minHeight,
-      padding: cardStyle.padding || (compact ? modeConfig.padding : resolvedTheme.spacing.card.padding),
+      padding: effectivePadding,
       borderRadius: resolvedTheme.borders.card.radius,
-      fontSize: cardStyle.fontSize || (compact ? modeConfig.fontSize : undefined),
+      fontSize: effectiveFontSize,
       zIndex: isDragging ? 1000 : zIndex,
       opacity: event.locked ? resolvedTheme.states.locked.opacity : (isActive ? 1 : 0.4),
       transform: isDragging ? 'scale(0.98)' : 'scale(1)',
@@ -144,8 +168,7 @@ function DraggableDefenceCardComponent({
       computedStyle.background = resolvedTheme.colors.background.gradient;
     }
 
-    const hasConflicts = event.conflicts && event.conflicts.length > 0;
-    const hasDoubleBooking = event.conflicts && event.conflicts.some(c => c === 'double-booking');
+    const hasConflicts = conflictCount > 0;
 
     // Build dynamic classes for selection and conflicts
     const borderWidth = isSelected ? resolvedTheme.states.selected.border.width : resolvedTheme.borders.card.width;
@@ -166,11 +189,23 @@ function DraggableDefenceCardComponent({
     if (hasDoubleBooking) {
       conflictRing = `0 0 0 ${resolvedTheme.states.conflicts.doubleBooking.ringWidth} ${resolvedTheme.states.conflicts.doubleBooking.ringColor}`;
     } else if (hasConflicts) {
-      conflictRing = `0 0 0 ${resolvedTheme.states.conflicts.availability.ringWidth} ${resolvedTheme.states.conflicts.availability.ringColor}`;
+      const severityColor =
+        conflictSeverity === 'error'
+          ? resolvedTheme.states.conflicts.availability.ringColor
+          : conflictSeverity === 'warning'
+          ? 'rgba(251, 191, 36, 0.8)'
+          : 'rgba(59,130,246,0.7)';
+      conflictRing = `0 0 0 ${resolvedTheme.states.conflicts.availability.ringWidth} ${severityColor}`;
     }
 
     if (conflictRing) {
       computedStyle.boxShadow = `${computedStyle.boxShadow}, ${conflictRing}`;
+    }
+
+    // Highlighted ring styling (for sidebar click-to-highlight)
+    if (highlighted) {
+      const highlightRing = `0 0 0 3px rgba(74, 85, 104, 0.6)`;
+      computedStyle.boxShadow = `${computedStyle.boxShadow}, ${highlightRing}`;
     }
 
     // Typography styles for different elements
@@ -195,12 +230,43 @@ function DraggableDefenceCardComponent({
       supervisorStyle: computedSupervisorStyle,
       lockedIconColor: computedLockedIconColor,
     };
-  }, [resolvedTheme, compact, stackOffset, event.color, event.locked, event.conflicts, event.programme, colorScheme, cardStyle, isDragging, zIndex, isActive, isSelected]);
+  }, [resolvedTheme, compact, stackOffset, event.color, event.locked, event.conflicts, event.programme, colorScheme, cardStyle, isDragging, zIndex, isActive, isSelected, highlighted]);
+
+  const warningItems = useMemo(() => {
+    const items: { key: string; count: number; title: string; icon: JSX.Element }[] = [];
+    if (doubleBookingCount > 0 || hasDoubleBooking) {
+      items.push({
+        key: 'double-booking',
+        count: Math.max(doubleBookingCount, 1),
+        title: `${Math.max(doubleBookingCount, 1)} double booking${Math.max(doubleBookingCount, 1) === 1 ? '' : 's'}`,
+        icon: (
+          <span className="inline-flex items-center justify-center scale-[1.5] origin-center">
+            <StatusErrorIcon label="Double booking" LEGACY_size="xlarge" />
+          </span>
+        ),
+      });
+    }
+    if (conflictCount > 0) {
+      items.push({
+        key: 'availability-conflict',
+        count: conflictCount,
+        title: `${conflictCount} participant${conflictCount === 1 ? '' : 's'} unavailable`,
+        icon: (
+          <span className="inline-flex items-center justify-center scale-[1.5] origin-center">
+            <PersonWarningIcon label="Participant unavailable" LEGACY_size="xlarge" />
+          </span>
+        ),
+      });
+    }
+    return items;
+  }, [doubleBookingCount, hasDoubleBooking, conflictCount]);
 
   return (
     <div
       ref={ref}
       className={compact ? 'relative' : 'absolute left-0'}
+      data-event-id={event.id}
+      data-prevent-clear="true"
       style={{
         ...style,
         filter: isActive && !isDragging ? `brightness(${resolvedTheme.states.hover.brightness})` : undefined,
@@ -208,6 +274,10 @@ function DraggableDefenceCardComponent({
       onClick={(e) => {
         e.stopPropagation();
         onClick(e);
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        onDoubleClick?.();
       }}
       onMouseEnter={(e) => {
         if (isActive) {
@@ -240,6 +310,37 @@ function DraggableDefenceCardComponent({
         </div>
       )}
 
+      {warningItems.length > 0 && (
+        <div
+          className={clsx(
+            'absolute text-gray-700',
+            compact
+              ? 'top-1 right-4 flex flex-row items-center gap-3 text-[20px] font-semibold'
+              : 'top-2 right-12 flex flex-row items-center gap-3'
+          )}
+        >
+          {warningItems.map(item => (
+            <div
+              key={item.key}
+              className={clsx(
+                'flex items-center',
+                compact ? undefined : 'gap-1 justify-end'
+              )}
+              title={item.title}
+            >
+              {compact ? (
+                item.icon
+              ) : (
+                <>
+                  <span>{item.count}</span>
+                  {item.icon}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Compact mode: condensed info with all participants */}
       {compact ? (
         <div className="flex items-center" style={{ gap: resolvedTheme.spacing.card.internalGap }}>
@@ -264,12 +365,23 @@ function DraggableDefenceCardComponent({
           </div>
 
           <div className="flex-1 min-w-0">
-            <div className="truncate" style={studentStyle}>
+            <div
+              className="break-words whitespace-normal"
+              style={{ ...studentStyle, wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+            >
               {event.student}
             </div>
-            <div className="truncate" style={{ ...supervisorStyle, marginTop: resolvedTheme.spacing.card.internalGap }}>
+            <div
+              className="break-words whitespace-normal"
+              style={{
+                ...supervisorStyle,
+                marginTop: resolvedTheme.spacing.card.internalGap,
+                wordBreak: 'break-word',
+                overflowWrap: 'anywhere',
+              }}
+            >
               {event.supervisor}
-              {event.coSupervisor && ` • ${event.coSupervisor}`}
+              {coSupervisorDisplay && ` • ${coSupervisorDisplay}`}
               {event.assessors.length > 0 && ` • ${event.assessors.join(', ')}`}
               {event.mentors && event.mentors.length > 0 && ` • ${event.mentors.join(', ')}`}
             </div>
@@ -286,7 +398,15 @@ function DraggableDefenceCardComponent({
           </div>
 
           {/* Student name with lock icon */}
-          <div className="flex items-center" style={{ ...studentStyle, gap: resolvedTheme.spacing.card.internalGap }}>
+          <div
+            className="flex items-center flex-wrap"
+            style={{
+              ...studentStyle,
+              gap: resolvedTheme.spacing.card.internalGap,
+              wordBreak: 'break-word',
+              overflowWrap: 'anywhere',
+            }}
+          >
             {event.student}
             {event.locked && (
               <Lock className="w-4 h-4 flex-shrink-0" style={{ color: lockedIconColor }} strokeWidth={2} />
@@ -294,7 +414,14 @@ function DraggableDefenceCardComponent({
           </div>
 
           {/* Supervisor */}
-          <div style={{ ...supervisorStyle, marginTop: resolvedTheme.spacing.card.internalGap }}>
+          <div
+            style={{
+              ...supervisorStyle,
+              marginTop: resolvedTheme.spacing.card.internalGap,
+              wordBreak: 'break-word',
+              overflowWrap: 'anywhere',
+            }}
+          >
             {event.supervisor}
           </div>
         </>
@@ -303,14 +430,20 @@ function DraggableDefenceCardComponent({
       {/* Full details */}
       {cardStyle.showFullDetails && (
         <>
-          {event.coSupervisor && (
-            <div className={`${cardStyle.fontSize} opacity-90`}>
-              Co-supervisor: {event.coSupervisor}
+          {coSupervisorDisplay && (
+            <div
+              className={`${cardStyle.fontSize} opacity-90 whitespace-normal break-words`}
+              style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+            >
+              Co-supervisor: {coSupervisorDisplay}
             </div>
           )}
 
           {event.assessors.length > 0 && (
-            <div className={`${cardStyle.fontSize} opacity-90 mt-1`}>
+            <div
+              className={`${cardStyle.fontSize} opacity-90 mt-1 whitespace-normal break-words`}
+              style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+            >
               <span className="font-semibold">Assessors:</span>
               <div className="ml-1">
                 {event.assessors.map((assessor, idx) => (
@@ -321,7 +454,10 @@ function DraggableDefenceCardComponent({
           )}
 
           {event.mentors.length > 0 && (
-            <div className={`${cardStyle.fontSize} opacity-90`}>
+            <div
+              className={`${cardStyle.fontSize} opacity-90 whitespace-normal break-words`}
+              style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+            >
               <span className="font-semibold">Mentors:</span>
               <div className="ml-1">
                 {event.mentors.map((mentor, idx) => (
@@ -348,7 +484,13 @@ export const DraggableDefenceCard = memo(DraggableDefenceCardComponent, (prevPro
       prevProps.stackOffset === nextProps.stackOffset &&
       prevProps.zIndex === nextProps.zIndex &&
       prevProps.cardStyle === nextProps.cardStyle &&
-      prevProps.theme === nextProps.theme) {
+      prevProps.theme === nextProps.theme &&
+      prevProps.highlighted === nextProps.highlighted &&
+      prevProps.conflictCount === nextProps.conflictCount &&
+      prevProps.conflictSeverity === nextProps.conflictSeverity &&
+      prevProps.hasDoubleBooking === nextProps.hasDoubleBooking &&
+      prevProps.doubleBookingCount === nextProps.doubleBookingCount &&
+      prevProps.colorScheme[prevProps.event.programme] === nextProps.colorScheme[nextProps.event.programme]) {
     return true;
   }
 
@@ -374,6 +516,11 @@ export const DraggableDefenceCard = memo(DraggableDefenceCardComponent, (prevPro
     prevProps.stackOffset === nextProps.stackOffset &&
     prevProps.zIndex === nextProps.zIndex &&
     prevProps.cardStyle.showFullDetails === nextProps.cardStyle.showFullDetails &&
-    prevProps.theme === nextProps.theme
+    prevProps.theme === nextProps.theme &&
+    prevProps.highlighted === nextProps.highlighted &&
+    prevProps.conflictCount === nextProps.conflictCount &&
+    prevProps.conflictSeverity === nextProps.conflictSeverity &&
+    prevProps.hasDoubleBooking === nextProps.hasDoubleBooking &&
+    prevProps.doubleBookingCount === nextProps.doubleBookingCount
   );
 });

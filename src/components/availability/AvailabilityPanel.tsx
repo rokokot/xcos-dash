@@ -2,10 +2,12 @@
  * panel v1 showing grid of timeslots with color status indicators
  * WIP v0.2.0 (29-10)
  */
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useTransition } from 'react';
 import { GripHorizontal } from 'lucide-react';
 import { AvailabilityGrid, RosterInfo } from './AvailabilityGrid';
 import { PersonAvailability, ViewGranularity, PersonRole, AvailabilityStatus } from './types';
+import { Conflict } from '../../types/schedule';
+import { RoomAvailabilityRoom } from '../panels/RoomAvailabilityDrawer';
 
 export interface AvailabilityPanelProps {
   availabilities: PersonAvailability[];
@@ -13,6 +15,7 @@ export interface AvailabilityPanelProps {
   dayLabels?: string[];
   timeSlots: string[];
   editable?: boolean;
+  columnWidth?: number;
   onPersonClick?: (personId: string) => void;
   onSlotClick?: (personId: string, day: string, timeSlot: string) => void;
   onSlotEdit?: (personId: string, day: string, timeSlot: string, newStatus: AvailabilityStatus, locked: boolean) => void;
@@ -25,6 +28,14 @@ export interface AvailabilityPanelProps {
   // Multi-roster support
   rosters?: RosterInfo[];
   activeRosterId?: string;
+  slotConflicts?: Map<string, Conflict[]>;
+  scheduledBookings?: Map<string, Map<string, string[]>>;
+  workloadStats?: Map<string, { required: number; scheduled: number }>;
+  columnHighlights?: Record<string, Record<string, 'primary' | 'match'>>;
+  roomAvailabilityRooms?: RoomAvailabilityRoom[];
+  roomDrawerSlot?: { day: string; timeSlot: string } | null;
+  sharedHeight?: number;
+  onHeightChange?: (height: number) => void;
 }
 
 export function AvailabilityPanel({
@@ -32,6 +43,7 @@ export function AvailabilityPanel({
   days,
   dayLabels,
   timeSlots,
+  columnWidth,
   editable = false,
   onPersonClick,
   onSlotClick,
@@ -39,17 +51,28 @@ export function AvailabilityPanel({
   onDayLockToggle,
   positioning = 'fixed',
   isExpanded: controlledIsExpanded,
-  onToggleExpanded,
+  onToggleExpanded: _onToggleExpanded,
   highlightedPersons = [],
   highlightedSlot,
   rosters,
   activeRosterId,
+  slotConflicts,
+  scheduledBookings,
+  workloadStats,
+  columnHighlights,
+  roomAvailabilityRooms,
+  roomDrawerSlot,
+  sharedHeight,
+  onHeightChange,
 }: AvailabilityPanelProps) {
   const [internalIsExpanded, _setInternalIsExpanded] = useState(false);
   const [granularity, setGranularity] = useState<ViewGranularity>('day');
   const [roleFilter, setRoleFilter] = useState<PersonRole | 'all'>('all');
-  const [panelHeight, setPanelHeight] = useState(525);
+  const [panelHeight, setPanelHeight] = useState(sharedHeight ?? 525);
   const [isDragging, setIsDragging] = useState(false);
+  const [contentMounted, setContentMounted] = useState(!!controlledIsExpanded);
+  const [roomDrawerOpen, setRoomDrawerOpen] = useState(true);
+  const [, startViewTransition] = useTransition();
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -59,11 +82,35 @@ export function AvailabilityPanel({
   const isExpanded = controlledIsExpanded !== undefined ? controlledIsExpanded : internalIsExpanded;
   // const _toggleExpanded = onToggleExpanded || (() => _setInternalIsExpanded(!internalIsExpanded));
 
-  // Memoize filtered availabilities to prevent recalculation on every render
-  const filteredAvailabilities = useMemo(() =>
-    availabilities.filter((person) => roleFilter === 'all' || person.role === roleFilter),
-    [availabilities, roleFilter]
-  );
+  useEffect(() => {
+    if (isExpanded) {
+      setContentMounted(true);
+    }
+  }, [isExpanded]);
+
+  useEffect(() => {
+    if (typeof sharedHeight === 'number' && sharedHeight > 0 && sharedHeight !== panelHeight) {
+      setPanelHeight(sharedHeight);
+    }
+  }, [sharedHeight, panelHeight]);
+
+  // Memoize filtered and sorted availabilities
+  // Highlighted persons appear first, then sorted alphabetically
+  const filteredAvailabilities = useMemo(() => {
+    const filtered = availabilities.filter((person) => roleFilter === 'all' || person.role === roleFilter);
+
+    return filtered.sort((a, b) => {
+      const aHighlighted = highlightedPersons.includes(a.name);
+      const bHighlighted = highlightedPersons.includes(b.name);
+
+      // Highlighted persons first
+      if (aHighlighted && !bHighlighted) return -1;
+      if (!aHighlighted && bHighlighted) return 1;
+
+      // Within same highlight status, sort alphabetically
+      return a.name.localeCompare(b.name);
+    });
+  }, [availabilities, roleFilter, highlightedPersons]);
 
   const positionClasses = positioning === 'fixed'
     ? 'fixed bottom-0 left-0 right-0 z-50'
@@ -80,12 +127,14 @@ export function AvailabilityPanel({
 
       // Direct DOM manipulation - bypasses React entirely
       panelRef.current.style.height = `${newHeight}px`;
+      onHeightChange?.(newHeight);
     };
 
     const handleMouseUp = () => {
       // Commit final height to state
       if (currentDragHeight.current > 0) {
         setPanelHeight(currentDragHeight.current);
+        onHeightChange?.(currentDragHeight.current);
       }
       setIsDragging(false);
     };
@@ -99,7 +148,7 @@ export function AvailabilityPanel({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging]);
+  }, [isDragging, onHeightChange]);
 
   const handleDragStart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -108,6 +157,10 @@ export function AvailabilityPanel({
     dragStartY.current = e.clientY;
     dragStartHeight.current = panelHeight;
     currentDragHeight.current = panelHeight;
+  };
+
+  const handleGranularityChange = (next: ViewGranularity) => {
+    startViewTransition(() => setGranularity(next));
   };
 
   return (
@@ -131,20 +184,24 @@ export function AvailabilityPanel({
       )}
 
       {/* Content area */}
-      {isExpanded && (
+      {contentMounted && (
         <div
-          className="h-full pt-2"
+          className="h-full pt-2 transition-opacity duration-200"
           style={{
-            pointerEvents: isDragging ? 'none' : 'auto',
+            pointerEvents: isExpanded ? (isDragging ? 'none' : 'auto') : 'none',
             minHeight: `${panelHeight - 10}px`,
-            overflow: 'hidden'
+            overflow: 'hidden',
+            opacity: isExpanded ? 1 : 0,
+            visibility: isExpanded ? 'visible' : 'hidden'
           }}
+          aria-hidden={!isExpanded}
         >
           <AvailabilityGrid
             availabilities={filteredAvailabilities}
             days={days}
             dayLabels={dayLabels}
             timeSlots={timeSlots}
+            columnWidth={columnWidth}
             granularity={granularity}
             editable={editable}
             onPersonClick={onPersonClick}
@@ -153,11 +210,19 @@ export function AvailabilityPanel({
             onDayLockToggle={onDayLockToggle}
             highlightedPersons={highlightedPersons}
             highlightedSlot={highlightedSlot}
-            onGranularityChange={setGranularity}
+            onGranularityChange={handleGranularityChange}
             roleFilter={roleFilter}
             onRoleFilterChange={(role) => setRoleFilter(role as PersonRole | 'all')}
             rosters={rosters}
             activeRosterId={activeRosterId}
+            slotConflicts={slotConflicts}
+            scheduledBookings={scheduledBookings}
+            workloadStats={workloadStats}
+            columnHighlights={columnHighlights}
+            roomDrawerRooms={roomAvailabilityRooms}
+            roomDrawerSlot={roomDrawerSlot}
+            roomDrawerOpen={roomDrawerOpen}
+            onRoomDrawerToggle={() => setRoomDrawerOpen(open => !open)}
           />
         </div>
       )}

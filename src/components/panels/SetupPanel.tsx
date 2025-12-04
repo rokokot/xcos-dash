@@ -8,7 +8,7 @@ import {
   programmes as kuleuvenProgrammes,
   departments as kuleuvenDepartments,
 } from '../../data/kuleuvenProgrammes';
-import { hasProgrammeData, getProgrammeDatasetInfo } from '../../services/programmeDataLoader';
+import { getAllProgrammeDatasets } from '../../services/programmeDataLoader';
 
 export interface SchedulingPeriod {
   id: string;
@@ -312,33 +312,8 @@ export function SetupPanel({
                     onChange={() => updateContext({ taskType: 'thesis-defences' })}
                     className="w-4 h-4 text-blue-600 border-gray-300 focus:ring-blue-500 mr-2"
                   />
-                  Thesis Defences
+                  Thesis Defenses
                 </label>
-                {context.taskType === 'thesis-defences' && (
-                  <div className="ml-6 space-y-1">
-                    <label className="flex items-center text-xs text-gray-600 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="thesisSubtype"
-                        checked={context.thesisSubtype === 'intermediate'}
-                        onChange={() => updateContext({ thesisSubtype: 'intermediate' })}
-                        className="w-3 h-3 text-blue-600 border-gray-300 focus:ring-blue-500 mr-2"
-                      />
-                      Intermediate
-                    </label>
-                    <label className="flex items-center text-xs text-gray-600 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="thesisSubtype"
-                        checked={context.thesisSubtype === 'final'}
-                        onChange={() => updateContext({ thesisSubtype: 'final' })}
-                        className="w-3 h-3 text-blue-600 border-gray-300 focus:ring-blue-500 mr-2"
-                      />
-                      Final
-                    </label>
-                  </div>
-                )}
-
                 <label className="flex items-center text-sm text-gray-600 cursor-pointer hover:text-gray-900">
                   <input
                     type="radio"
@@ -539,17 +514,19 @@ export function SetupPanel({
               </div>
             ) : (
               filteredProgrammes.map(prog => {
-                const hasData = hasProgrammeData(prog.id);
-                const datasetInfo = hasData ? getProgrammeDatasetInfo(prog.id) : null;
+                // Get all datasets for this programme
+                const datasets = getAllProgrammeDatasets(prog.id);
+                const hasData = datasets.length > 0;
 
                 return (
                   <div
                     key={prog.id}
-                    className={`p-4 border-b border-gray-200 cursor-pointer transition-all hover:bg-blue-50 ${
+                    className={`p-4 border-b border-gray-200 transition-all ${
                       context.programme?.id === prog.id ? 'bg-blue-100 border-l-4 border-l-blue-600' : 'bg-white'
                     }`}
                   >
                     <div
+                      className="cursor-pointer hover:bg-blue-50"
                       onClick={() => {
                         const matchingDept = availableDepartments.find(d => d.code === prog.code.split('-')[0]);
                         updateContext({
@@ -582,19 +559,22 @@ export function SetupPanel({
                         </span>
                       </div>
                     </div>
-                    {hasData && datasetInfo && (
-                      <div className="mt-2 pt-2 border-t border-gray-200">
+                    {hasData && datasets.map((ds, idx) => (
+                      <div key={ds.key} className={`mt-2 pt-2 border-t border-gray-200 ${idx > 0 ? 'mt-1' : ''}`}>
                         <div className="flex items-center justify-between">
-                          <span className="text-xs text-gray-600">{datasetInfo.description}</span>
+                          <span className="text-xs text-gray-600">{ds.dataset.description}</span>
                           <button
-                            onClick={() => onLoadProgrammeData?.(prog.id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onLoadProgrammeData?.(ds.key);
+                            }}
                             className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
                           >
                             Load Data
                           </button>
                         </div>
                       </div>
-                    )}
+                    ))}
                   </div>
                 );
               })

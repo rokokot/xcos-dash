@@ -41,6 +41,8 @@ export interface FilterPanelProps {
   timeHorizon?: TimeHorizon;
   onTimeHorizonChange?: (horizon: TimeHorizon) => void;
   breadcrumbs?: BreadcrumbItem[];
+  colorScheme?: Record<string, string>;
+  onColorChange?: (programme: string, color: string) => void;
 }
 
 export function FilterPanel({
@@ -53,6 +55,8 @@ export function FilterPanel({
   timeHorizon,
   onTimeHorizonChange,
   breadcrumbs = [],
+  colorScheme,
+  onColorChange,
 }: FilterPanelProps) {
   const [horizonExpanded, setHorizonExpanded] = useState(true);
   const [statusExpanded, setStatusExpanded] = useState(true);
@@ -307,18 +311,29 @@ export function FilterPanel({
           {programmeExpanded && (
             <div className="space-y-2 ml-1">
               {availableProgrammes.map(prog => (
-                <label
+                <div
                   key={prog}
-                  className="flex items-center text-sm text-gray-600 hover:text-gray-900 cursor-pointer"
+                  className="flex items-center gap-2"
                 >
-                  <input
-                    type="checkbox"
-                    checked={filters.programmes.includes(prog)}
-                    onChange={() => toggleProgramme(prog)}
-                    className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                  />
-                  <span className="ml-2">{prog}</span>
-                </label>
+                  <label className="flex items-center text-sm text-gray-600 hover:text-gray-900 cursor-pointer flex-1">
+                    <input
+                      type="checkbox"
+                      checked={filters.programmes.includes(prog)}
+                      onChange={() => toggleProgramme(prog)}
+                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                    />
+                    <span className="ml-2">{prog}</span>
+                  </label>
+                  {colorScheme && onColorChange && (
+                    <input
+                      type="color"
+                      value={colorScheme[prog] || '#6bc7eeff'}
+                      onChange={(e) => onColorChange(prog, e.target.value)}
+                      className="w-8 h-8 rounded border border-gray-300 cursor-pointer"
+                      title={`Change ${prog} color`}
+                    />
+                  )}
+                </div>
               ))}
             </div>
           )}
